@@ -7,9 +7,26 @@ import os
 import sys
 import multiprocessing
 import warnings
+import builtins
 import numpy as np
 from typing import List, Optional, Tuple, Any, Dict
 import time
+
+
+def safe_print(*args, **kwargs):
+    """Print without crashing on non-UTF8 Windows consoles."""
+    try:
+        builtins.print(*args, **kwargs)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "utf-8"
+        sep = kwargs.get("sep", " ")
+        end = kwargs.get("end", "\n")
+        text = sep.join(str(arg) for arg in args)
+        safe_text = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        builtins.print(safe_text, end=end)
+
+
+print = safe_print
 
 # Suppress common audio processing warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='librosa')
@@ -1423,15 +1440,56 @@ for _dir in _fpcalc_dirs:
 
 try:
     import acoustid
+    import subprocess
+    import sys
+    import os as _os_module
     HAS_CHROMAPRINT = True
-except ImportError:
+    
+    # Monkey-patch acoustid to suppress fpcalc stderr output
+    # This prevents mpg123 decoder errors from flooding the console
+    _original_fingerprint_file = acoustid.fingerprint_file
+    
+    def _silent_fingerprint_file(path, maxlength=120):
+        """Wrapper to suppress fpcalc stderr (mpg123 errors)"""
+        try:
+            # Save original stderr
+            old_stderr = sys.stderr
+            
+            try:
+                # Redirect stderr to null during fpcalc execution
+                sys.stderr = open(_os_module.devnull, 'w')
+                result = _original_fingerprint_file(path, maxlength)
+                return result
+            finally:
+                # Restore stderr
+                if sys.stderr != old_stderr:
+                    sys.stderr.close()
+                sys.stderr = old_stderr
+                
+        except Exception:
+            # Silently ignore fpcalc failures (corrupted audio)
+            return None, None
+    
+    # Apply the patch
+    acoustid.fingerprint_file = _silent_fingerprint_file
+    
+except (ImportError, AttributeError) as e:
     acoustid = None
+    HAS_CHROMAPRINT = False
 
 try:
     import librosa
+    import warnings
+    
+    # Suppress librosa deprecation warnings
+    warnings.filterwarnings('ignore', category=FutureWarning, module='librosa')
+    warnings.filterwarnings('ignore', category=FutureWarning, message='.*audioread.*')
+    warnings.filterwarnings('ignore', category=UserWarning, module='librosa')
+    
     HAS_LIBROSA = True
 except ImportError:
     librosa = None
+    HAS_LIBROSA = False
 
 try:
     import soundfile as sf
@@ -1581,12 +1639,16 @@ class AudioFingerprinter:
             # acoustid.fingerprint_file returns (duration, fingerprint)
             duration, fingerprint = acoustid.fingerprint_file(audio_path)
             
+            # Silently ignore if fingerprint_file returns None (corrupted audio)
+            if duration is None or fingerprint is None:
+                return None
+            
             return {
                 "fingerprint": fingerprint,
                 "duration": duration
             }
-        except Exception as e:
-            print(f"[Audio] ⚠️ Chromaprint failed for {audio_path}: {e}")
+        except Exception:
+            # Silently ignore failures - usually corrupted/unsupported audio
             return None
     
     def _compute_mfcc_fingerprint(self, audio_path: str) -> Optional[np.ndarray]:
@@ -1644,8 +1706,8 @@ class AudioFingerprinter:
                 
             return fingerprint
             
-        except Exception as e:
-            print(f"[Audio] ⚠️ MFCC failed for {audio_path}: {e}")
+        except Exception:
+            # Silently ignore failures - usually corrupted/unsupported audio
             return None
     
     def _compute_mfcc_gpu(self, y: np.ndarray, sr: int) -> Optional[np.ndarray]:
@@ -1709,8 +1771,8 @@ class AudioFingerprinter:
             mfccs = cp.asnumpy(mfccs_gpu)
             return mfccs
             
-        except Exception as e:
-            print(f"[Audio] GPU MFCC failed, falling back to CPU: {e}")
+        except Exception:
+            # Silently fall back to CPU
             return self._compute_mfcc_cpu(y, sr)
     
     def _compute_mfcc_cpu(self, y: np.ndarray, sr: int) -> Optional[np.ndarray]:
@@ -1724,8 +1786,8 @@ class AudioFingerprinter:
                 hop_length=self.MFCC_HOP_LENGTH
             )
             return mfccs
-        except Exception as e:
-            print(f"[Audio] CPU MFCC failed: {e}")
+        except Exception:
+            # Silently ignore failures
             return None
     
     def compare_fingerprints(
@@ -1914,8 +1976,8 @@ class AudioFingerprinter:
             # Clamp to [0, 1]
             return max(0.0, min(1.0, similarity))
             
-        except Exception as e:
-            print(f"[Audio] MFCC comparison failed: {e}")
+        except Exception:
+            # Silently return 0 similarity on comparison failure
             return 0.0
     
     def batch_fingerprint_audio(
@@ -2010,7 +2072,7 @@ HAS_SENTENCE_TRANSFORMERS = False
 try:
     from sentence_transformers import SentenceTransformer
     HAS_SENTENCE_TRANSFORMERS = True
-except ImportError:
+except Exception:
     pass
 
 

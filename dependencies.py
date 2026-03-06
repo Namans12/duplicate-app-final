@@ -141,8 +141,8 @@ try:
     SentenceTransformer = _ST
     HAS_TRANSFORMERS = True
     logger.debug("SentenceTransformers available")
-except ImportError:
-    logger.info("SentenceTransformers not available - semantic similarity disabled")
+except Exception as e:
+    logger.warning(f"SentenceTransformers unavailable - semantic similarity disabled: {e}")
 
 # Audio processing
 HAS_AUDIO = False
@@ -152,8 +152,8 @@ try:
     AudioSegment = _AS
     HAS_AUDIO = True
     logger.debug("pydub available")
-except ImportError:
-    logger.info("pydub not available - audio processing disabled")
+except Exception as e:
+    logger.info(f"pydub unavailable - audio processing disabled: {e}")
 
 # Chromaprint for audio fingerprinting
 HAS_CHROMAPRINT = False
@@ -163,8 +163,8 @@ try:
     acoustid = _acoustid
     HAS_CHROMAPRINT = True
     logger.debug("acoustid available")
-except ImportError:
-    logger.info("acoustid not available - audio fingerprinting disabled")
+except Exception as e:
+    logger.info(f"acoustid unavailable - audio fingerprinting disabled: {e}")
 
 # librosa for audio analysis
 HAS_LIBROSA = False
@@ -174,8 +174,8 @@ try:
     librosa = _librosa
     HAS_LIBROSA = True
     logger.debug("librosa available")
-except ImportError:
-    logger.info("librosa not available - MFCC analysis disabled")
+except Exception as e:
+    logger.info(f"librosa unavailable - MFCC analysis disabled: {e}")
 
 # soundfile for audio I/O
 HAS_SOUNDFILE = False
@@ -185,8 +185,8 @@ try:
     soundfile = _sf
     HAS_SOUNDFILE = True
     logger.debug("soundfile available")
-except ImportError:
-    logger.info("soundfile not available")
+except Exception as e:
+    logger.info(f"soundfile unavailable: {e}")
 
 
 # =============================================================================

@@ -565,8 +565,8 @@ class ModernDuplicateFinder(QMainWindow):
         toolbar = self.addToolBar('Quick Actions')
         toolbar.setMovable(False)
         
-    # Removed Browse action (use Ctrl+O menu or file menu) to free toolbar space
-    toolbar.addSeparator()
+        # Removed Browse action (use Ctrl+O menu or file menu) to free toolbar space
+        toolbar.addSeparator()
         
         # Theme toggle
         theme_action = QAction('🌙' if not self.dark_mode else '☀️', self)
@@ -619,10 +619,10 @@ class ModernDuplicateFinder(QMainWindow):
         dark_palette = QPalette()
         dark_palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
         dark_palette.setColor(QPalette.ColorRole.WindowText, QColor(255, 255, 255))
-    # Ensure text contrast and larger default font for readability
-    font = QFont()
-    font.setPointSize(10)
-    self.setFont(font)
+        # Ensure text contrast and larger default font for readability
+        font = QFont()
+        font.setPointSize(10)
+        self.setFont(font)
         dark_palette.setColor(QPalette.ColorRole.Base, QColor(25, 25, 25))
         dark_palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
         dark_palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(0, 0, 0))
@@ -636,8 +636,8 @@ class ModernDuplicateFinder(QMainWindow):
         dark_palette.setColor(QPalette.ColorRole.HighlightedText, QColor(0, 0, 0))
         
         self.setPalette(dark_palette)
-    # Enforce widget stylesheet tweaks for dark mode
-    self.setStyleSheet(self.styleSheet() + "\nQLabel, QLineEdit, QTreeWidget, QTextEdit { color: #eeeeee; }")
+        # Enforce widget stylesheet tweaks for dark mode
+        self.setStyleSheet(self.styleSheet() + "\nQLabel, QLineEdit, QTreeWidget, QTextEdit { color: #eeeeee; }")
         
     def apply_light_theme(self):
         """Apply light theme styling"""

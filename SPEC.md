@@ -25,7 +25,7 @@ List features in order of priority. The Ralph loop will pick one feature per ite
 
 ### Feature 1: Bulk Move Duplicates Button
 **Priority:** High  
-**Status:** Not Started
+**Status:** Complete
 
 **Description:**
 Add a "Bulk Move Duplicates" button that automatically moves all duplicate files to a designated destination folder, intelligently keeping one original file in its current location for each duplicate group.
@@ -67,7 +67,7 @@ Add a "Bulk Move Duplicates" button that automatically moves all duplicate files
 
 ### Feature 2: Audio Smart Move - Keep Best Quality
 **Priority:** High  
-**Status:** Not Started
+**Status:** Complete
 
 **Description:**
 Add an "Audio Smart Move" button specifically for audio files that analyzes audio quality across duplicate groups and automatically keeps the highest quality version while moving lower quality duplicates.

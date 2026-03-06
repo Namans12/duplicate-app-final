@@ -25,10 +25,15 @@ from PyQt6.QtWidgets import (
     QTextEdit, QSplitter, QCheckBox, QGroupBox, QGridLayout, QSpinBox,
     QTabWidget, QTreeWidget, QTreeWidgetItem, QSlider, QLineEdit, QFrame,
     QScrollArea, QMenu, QToolBar, QStatusBar, QToolButton, QStyle,
-    QSystemTrayIcon, QWidgetAction, QInputDialog, QDialog
+    QSystemTrayIcon, QWidgetAction, QInputDialog, QDialog, QSizePolicy,
+    QButtonGroup
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QSettings, QSize, QMimeData
 from PyQt6.QtGui import QPixmap, QAction, QShortcut, QKeySequence, QIcon, QDragEnterEvent, QDropEvent, QPalette, QColor, QFont
+
+# Initialize logger early since it's needed for import error handling
+import logging
+logger = logging.getLogger(__name__)
 
 # Try to import send2trash for recycle bin support
 try:
@@ -42,33 +47,33 @@ try:
     from PIL import Image
     import imagehash
     HAS_PILLOW = True
-except ImportError:
+except Exception:
     HAS_PILLOW = False
 
 try:
     import cv2
     HAS_CV2 = True
-except ImportError:
+except Exception:
     HAS_CV2 = False
 
 try:
     from sentence_transformers import SentenceTransformer
     HAS_TRANSFORMERS = True
-except ImportError:
+except Exception:
     HAS_TRANSFORMERS = False
 
 try:
     from pydub import AudioSegment
     import numpy as np
     HAS_AUDIO = True
-except ImportError:
+except Exception:
     HAS_AUDIO = False
 
 # Try to import numpy for optimized operations
 try:
     import numpy as np
     HAS_NUMPY = True
-except ImportError:
+except Exception:
     HAS_NUMPY = False
 
 # CUDA / GPU Acceleration imports
@@ -132,10 +137,6 @@ MemoryManager = None
 StreamingHasher = None
 FileMerger = None
 
-# Initialize logger early since it's needed for import error handling
-import logging
-logger = logging.getLogger(__name__)
-
 try:
     from database_manager import DatabaseManager
     from plugin_system import PluginManager
@@ -169,6 +170,7 @@ from dependencies import (
     AppConfig, HAS_CUDA as DEP_HAS_CUDA, CUDA_BACKEND as DEP_CUDA_BACKEND,
     HAS_SEND2TRASH as DEP_SEND2TRASH, send2trash_func
 )
+from audio_quality_analyzer import AudioQualityAnalyzer
 
 # Use centralized get_optimal_workers
 get_optimal_workers = AppConfig.get_optimal_workers
@@ -187,269 +189,390 @@ else:
 # Theme definitions
 DARK_THEME = """
 QMainWindow, QWidget {
-    background-color: #1e1e1e;
-    color: #ffffff;
+    background-color: #17191d;
+    color: #f3f6fb;
 }
 QGroupBox {
-    border: 1px solid #3d3d3d;
-    border-radius: 5px;
-    margin-top: 10px;
-    padding-top: 10px;
+    border: 1px solid #323846;
+    border-radius: 10px;
+    margin-top: 18px;
+    padding-top: 24px;
     font-weight: bold;
-    color: #4fc3f7;
+    color: #78c9ff;
+    background-color: #1c2027;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 5px;
+    left: 14px;
+    padding: 2px 8px 4px 8px;
 }
-QPushButton {
-    background-color: #0d47a1;
+QPushButton, QToolButton {
+    background-color: #234a7a;
     color: white;
-    border: none;
-    padding: 8px 16px;
-    border-radius: 4px;
-    font-weight: bold;
+    border: 1px solid #35649c;
+    padding: 9px 16px;
+    border-radius: 8px;
+    font-weight: 600;
+    min-height: 20px;
 }
-QPushButton:hover {
-    background-color: #1565c0;
+QPushButton:hover, QToolButton:hover {
+    background-color: #2b5f9a;
+    border-color: #4f88c5;
 }
-QPushButton:pressed {
-    background-color: #0a3d91;
+QPushButton:pressed, QToolButton:pressed {
+    background-color: #1c3f67;
 }
-QPushButton:disabled {
-    background-color: #424242;
-    color: #757575;
+QPushButton:checked, QToolButton:checked {
+    background-color: #0f79b8;
+    border-color: #55b3e8;
+}
+QPushButton:disabled, QToolButton:disabled {
+    background-color: #2a2f39;
+    color: #6d7480;
+    border-color: #2f3540;
 }
 QLineEdit, QSpinBox, QComboBox {
-    background-color: #2d2d2d;
-    border: 1px solid #3d3d3d;
-    border-radius: 4px;
-    padding: 5px;
-    color: white;
+    background-color: #20242c;
+    border: 1px solid #394150;
+    border-radius: 8px;
+    padding: 7px 10px;
+    color: #f3f6fb;
+    min-height: 20px;
 }
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
-    border: 1px solid #4fc3f7;
+    border: 1px solid #78c9ff;
+}
+QComboBox {
+    padding-right: 34px;
+}
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 28px;
+    border-left: 1px solid #394150;
+    border-top-right-radius: 8px;
+    border-bottom-right-radius: 8px;
+    background-color: #262b35;
+}
+QComboBox::down-arrow {
+    width: 10px;
+    height: 10px;
+    margin-right: 6px;
+}
+QComboBox QAbstractItemView {
+    background-color: #20242c;
+    color: #f3f6fb;
+    border: 1px solid #394150;
+    selection-background-color: #2d5d95;
+    selection-color: white;
+    outline: 0;
 }
 QTreeWidget, QListWidget, QTextEdit {
-    background-color: #252525;
-    border: 1px solid #3d3d3d;
-    border-radius: 4px;
-    color: white;
+    background-color: #1d2128;
+    border: 1px solid #323846;
+    border-radius: 8px;
+    color: #f3f6fb;
 }
 QTreeWidget::item:selected, QListWidget::item:selected {
-    background-color: #0d47a1;
+    background-color: #295e96;
 }
 QTreeWidget::item:hover, QListWidget::item:hover {
-    background-color: #333333;
+    background-color: #282d36;
+}
+QHeaderView::section {
+    background-color: #232833;
+    color: #d8e2ee;
+    padding: 8px 10px;
+    border: none;
+    border-right: 1px solid #323846;
+    border-bottom: 1px solid #323846;
+    font-weight: 600;
 }
 QProgressBar {
-    border: 1px solid #3d3d3d;
-    border-radius: 4px;
+    border: 1px solid #394150;
+    border-radius: 7px;
     text-align: center;
-    background-color: #2d2d2d;
+    background-color: #20242c;
+    min-height: 18px;
 }
 QProgressBar::chunk {
-    background-color: #4caf50;
-    border-radius: 3px;
+    background-color: #2f9d68;
+    border-radius: 6px;
 }
 QTabWidget::pane {
-    border: 1px solid #3d3d3d;
-    border-radius: 4px;
+    border: 1px solid #323846;
+    border-radius: 8px;
+    top: -1px;
 }
 QTabBar::tab {
-    background-color: #2d2d2d;
-    color: white;
-    padding: 8px 16px;
-    border-top-left-radius: 4px;
-    border-top-right-radius: 4px;
+    background-color: #232833;
+    color: #dce6f1;
+    padding: 10px 18px;
+    border: 1px solid #323846;
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    margin-right: 4px;
 }
 QTabBar::tab:selected {
-    background-color: #0d47a1;
+    background-color: #295e96;
+    color: white;
 }
 QTabBar::tab:hover {
-    background-color: #3d3d3d;
+    background-color: #2b3140;
 }
 QSlider::groove:horizontal {
     height: 6px;
-    background: #3d3d3d;
+    background: #323846;
     border-radius: 3px;
 }
 QSlider::handle:horizontal {
-    background: #4fc3f7;
+    background: #78c9ff;
     width: 16px;
     margin: -5px 0;
     border-radius: 8px;
 }
 QCheckBox {
-    color: white;
+    color: #f3f6fb;
 }
 QCheckBox::indicator {
     width: 18px;
     height: 18px;
 }
 QCheckBox::indicator:unchecked {
-    border: 2px solid #757575;
+    border: 2px solid #727b88;
     border-radius: 3px;
     background: transparent;
 }
 QCheckBox::indicator:checked {
-    border: 2px solid #4caf50;
+    border: 2px solid #2f9d68;
     border-radius: 3px;
-    background: #4caf50;
+    background: #2f9d68;
 }
 QToolBar {
-    background-color: #252525;
+    background-color: #1c2027;
     border: none;
-    spacing: 5px;
-    padding: 5px;
+    spacing: 8px;
+    padding: 8px;
 }
 QStatusBar {
-    background-color: #1a1a1a;
-    color: #888888;
+    background-color: #14171c;
+    color: #9ea7b3;
 }
 QToolTip {
-    background-color: #333333;
+    background-color: #232833;
     color: white;
-    border: 1px solid #4fc3f7;
-    padding: 5px;
-    border-radius: 3px;
+    border: 1px solid #78c9ff;
+    padding: 6px 8px;
+    border-radius: 6px;
 }
 QMenu {
-    background-color: #2d2d2d;
-    border: 1px solid #3d3d3d;
+    background-color: #20242c;
+    border: 1px solid #323846;
     color: white;
+    padding: 6px;
+}
+QMenu::item {
+    padding: 8px 24px 8px 12px;
+    border-radius: 6px;
 }
 QMenu::item:selected {
-    background-color: #0d47a1;
+    background-color: #295e96;
 }
 """
 
 LIGHT_THEME = """
 QMainWindow, QWidget {
-    background-color: #f5f5f5;
-    color: #333333;
+    background-color: #f3f6fb;
+    color: #243142;
 }
 QGroupBox {
-    border: 1px solid #cccccc;
-    border-radius: 5px;
-    margin-top: 10px;
-    padding-top: 10px;
+    border: 1px solid #cfd8e3;
+    border-radius: 10px;
+    margin-top: 18px;
+    padding-top: 24px;
     font-weight: bold;
-    color: #1565c0;
+    color: #1f5f95;
+    background-color: #fbfcfe;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 5px;
+    left: 14px;
+    padding: 2px 8px 4px 8px;
 }
-QPushButton {
-    background-color: #1976d2;
+QPushButton, QToolButton {
+    background-color: #2e6ea8;
     color: white;
-    border: none;
-    padding: 8px 16px;
-    border-radius: 4px;
-    font-weight: bold;
+    border: 1px solid #4a84ba;
+    padding: 9px 16px;
+    border-radius: 8px;
+    font-weight: 600;
+    min-height: 20px;
 }
-QPushButton:hover {
-    background-color: #1e88e5;
+QPushButton:hover, QToolButton:hover {
+    background-color: #3a7dbc;
+    border-color: #5c97cc;
 }
-QPushButton:pressed {
-    background-color: #1565c0;
+QPushButton:pressed, QToolButton:pressed {
+    background-color: #265f92;
 }
-QPushButton:disabled {
-    background-color: #bdbdbd;
-    color: #757575;
+QPushButton:checked, QToolButton:checked {
+    background-color: #1676bf;
+    border-color: #3a93d8;
+}
+QPushButton:disabled, QToolButton:disabled {
+    background-color: #d9e0e8;
+    color: #7d8792;
+    border-color: #d0d7df;
 }
 QLineEdit, QSpinBox, QComboBox {
     background-color: white;
-    border: 1px solid #cccccc;
-    border-radius: 4px;
-    padding: 5px;
-    color: #333333;
+    border: 1px solid #c8d1dc;
+    border-radius: 8px;
+    padding: 7px 10px;
+    color: #243142;
+    min-height: 20px;
 }
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
-    border: 1px solid #1976d2;
+    border: 1px solid #2f84c8;
+}
+QComboBox {
+    padding-right: 34px;
+}
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 28px;
+    border-left: 1px solid #c8d1dc;
+    border-top-right-radius: 8px;
+    border-bottom-right-radius: 8px;
+    background-color: #eef3f8;
+}
+QComboBox::down-arrow {
+    width: 10px;
+    height: 10px;
+    margin-right: 6px;
+}
+QComboBox QAbstractItemView {
+    background-color: white;
+    color: #243142;
+    border: 1px solid #c8d1dc;
+    selection-background-color: #d7ebfb;
+    selection-color: #243142;
+    outline: 0;
 }
 QTreeWidget, QListWidget, QTextEdit {
     background-color: white;
-    border: 1px solid #cccccc;
-    border-radius: 4px;
-    color: #333333;
+    border: 1px solid #cfd8e3;
+    border-radius: 8px;
+    color: #243142;
 }
 QTreeWidget::item:selected, QListWidget::item:selected {
-    background-color: #bbdefb;
-    color: #333333;
+    background-color: #d8ebfa;
+    color: #243142;
 }
 QTreeWidget::item:hover, QListWidget::item:hover {
-    background-color: #e3f2fd;
+    background-color: #eef5fb;
+}
+QHeaderView::section {
+    background-color: #eef3f8;
+    color: #304155;
+    padding: 8px 10px;
+    border: none;
+    border-right: 1px solid #d6dee8;
+    border-bottom: 1px solid #d6dee8;
+    font-weight: 600;
 }
 QProgressBar {
-    border: 1px solid #cccccc;
-    border-radius: 4px;
+    border: 1px solid #c8d1dc;
+    border-radius: 7px;
     text-align: center;
-    background-color: #e0e0e0;
+    background-color: #e9eef4;
+    min-height: 18px;
 }
 QProgressBar::chunk {
-    background-color: #4caf50;
-    border-radius: 3px;
+    background-color: #309866;
+    border-radius: 6px;
 }
 QTabWidget::pane {
-    border: 1px solid #cccccc;
-    border-radius: 4px;
+    border: 1px solid #d0d8e3;
+    border-radius: 8px;
+    top: -1px;
 }
 QTabBar::tab {
-    background-color: #e0e0e0;
-    color: #333333;
-    padding: 8px 16px;
-    border-top-left-radius: 4px;
-    border-top-right-radius: 4px;
+    background-color: #e8eef5;
+    color: #314155;
+    padding: 10px 18px;
+    border: 1px solid #d0d8e3;
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    margin-right: 4px;
 }
 QTabBar::tab:selected {
-    background-color: #1976d2;
+    background-color: #2e6ea8;
     color: white;
 }
 QTabBar::tab:hover {
-    background-color: #bdbdbd;
+    background-color: #dce6f0;
 }
 QSlider::groove:horizontal {
     height: 6px;
-    background: #cccccc;
+    background: #cfd8e3;
     border-radius: 3px;
 }
 QSlider::handle:horizontal {
-    background: #1976d2;
+    background: #2e84c8;
     width: 16px;
     margin: -5px 0;
     border-radius: 8px;
 }
 QCheckBox {
-    color: #333333;
+    color: #243142;
+}
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+}
+QCheckBox::indicator:unchecked {
+    border: 2px solid #8390a0;
+    border-radius: 3px;
+    background: transparent;
+}
+QCheckBox::indicator:checked {
+    border: 2px solid #309866;
+    border-radius: 3px;
+    background: #309866;
 }
 QToolBar {
-    background-color: #e0e0e0;
+    background-color: #eef3f8;
     border: none;
-    spacing: 5px;
-    padding: 5px;
+    spacing: 8px;
+    padding: 8px;
 }
 QStatusBar {
-    background-color: #e0e0e0;
-    color: #666666;
+    background-color: #e8eef5;
+    color: #5f6d7d;
 }
 QToolTip {
-    background-color: #333333;
+    background-color: #243142;
     color: white;
-    border: 1px solid #1976d2;
-    padding: 5px;
-    border-radius: 3px;
+    border: 1px solid #2e84c8;
+    padding: 6px 8px;
+    border-radius: 6px;
 }
 QMenu {
     background-color: white;
-    border: 1px solid #cccccc;
-    color: #333333;
+    border: 1px solid #cfd8e3;
+    color: #243142;
+    padding: 6px;
+}
+QMenu::item {
+    padding: 8px 24px 8px 12px;
+    border-radius: 6px;
 }
 QMenu::item:selected {
-    background-color: #bbdefb;
+    background-color: #d8ebfa;
 }
 """
 
@@ -601,6 +724,234 @@ class ScanFilters:
         return True
 
 
+CATEGORY_PRESETS = {
+    "general": {
+        "label": "General Files",
+        "types": [],
+        "accuracy": {
+            "hash_type": "MD5",
+            "find_similar": True,
+            "compare_by_name": True,
+            "name_similarity": 0.85,
+            "compare_by_size": True,
+            "size_tolerance": 2,
+            "compare_text_content": True,
+            "content_similarity": 0.9,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        },
+        "performance": {
+            "hash_type": "MD5",
+            "find_similar": False,
+            "compare_by_name": False,
+            "name_similarity": 0.8,
+            "compare_by_size": False,
+            "size_tolerance": 1,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        }
+    },
+    "photos": {
+        "label": "Photos",
+        "types": ["images"],
+        "accuracy": {
+            "hash_type": "Perceptual",
+            "find_similar": True,
+            "compare_by_name": True,
+            "name_similarity": 0.8,
+            "compare_by_size": True,
+            "size_tolerance": 0.5,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "aggressive",
+            "use_gpu": True
+        },
+        "performance": {
+            "hash_type": "MD5",
+            "find_similar": False,
+            "compare_by_name": False,
+            "name_similarity": 0.8,
+            "compare_by_size": False,
+            "size_tolerance": 1,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        }
+    },
+    "videos": {
+        "label": "Videos",
+        "types": ["video"],
+        "accuracy": {
+            "hash_type": "Perceptual",
+            "find_similar": True,
+            "compare_by_name": True,
+            "name_similarity": 0.85,
+            "compare_by_size": True,
+            "size_tolerance": 10,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "aggressive",
+            "use_gpu": True
+        },
+        "performance": {
+            "hash_type": "MD5",
+            "find_similar": False,
+            "compare_by_name": False,
+            "name_similarity": 0.8,
+            "compare_by_size": False,
+            "size_tolerance": 5,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        }
+    },
+    "music": {
+        "label": "Music",
+        "types": ["audio"],
+        "accuracy": {
+            "hash_type": "Audio",
+            "find_similar": True,
+            "compare_by_name": True,
+            "name_similarity": 0.85,
+            "compare_by_size": True,
+            "size_tolerance": 3,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        },
+        "performance": {
+            "hash_type": "MD5",
+            "find_similar": False,
+            "compare_by_name": False,
+            "name_similarity": 0.8,
+            "compare_by_size": False,
+            "size_tolerance": 2,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        }
+    },
+    "documents": {
+        "label": "Documents",
+        "types": ["documents", "text"],
+        "accuracy": {
+            "hash_type": "Semantic",
+            "find_similar": True,
+            "compare_by_name": True,
+            "name_similarity": 0.85,
+            "compare_by_size": True,
+            "size_tolerance": 1,
+            "compare_text_content": True,
+            "content_similarity": 0.92,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        },
+        "performance": {
+            "hash_type": "MD5",
+            "find_similar": False,
+            "compare_by_name": False,
+            "name_similarity": 0.8,
+            "compare_by_size": False,
+            "size_tolerance": 1,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        }
+    },
+    "archives": {
+        "label": "Archives",
+        "types": ["archives"],
+        "accuracy": {
+            "hash_type": "SHA256",
+            "find_similar": True,
+            "compare_by_name": True,
+            "name_similarity": 0.85,
+            "compare_by_size": True,
+            "size_tolerance": 1,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        },
+        "performance": {
+            "hash_type": "MD5",
+            "find_similar": False,
+            "compare_by_name": False,
+            "name_similarity": 0.8,
+            "compare_by_size": False,
+            "size_tolerance": 1,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        }
+    },
+    "code": {
+        "label": "Code",
+        "types": ["code", "text"],
+        "accuracy": {
+            "hash_type": "SHA256",
+            "find_similar": True,
+            "compare_by_name": True,
+            "name_similarity": 0.85,
+            "compare_by_size": True,
+            "size_tolerance": 1,
+            "compare_text_content": True,
+            "content_similarity": 0.95,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        },
+        "performance": {
+            "hash_type": "MD5",
+            "find_similar": False,
+            "compare_by_name": False,
+            "name_similarity": 0.8,
+            "compare_by_size": False,
+            "size_tolerance": 1,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        }
+    },
+    "other": {
+        "label": "Other Files",
+        "types": [],
+        "accuracy": {
+            "hash_type": "MD5",
+            "find_similar": True,
+            "compare_by_name": True,
+            "name_similarity": 0.85,
+            "compare_by_size": True,
+            "size_tolerance": 1,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        },
+        "performance": {
+            "hash_type": "MD5",
+            "find_similar": False,
+            "compare_by_name": False,
+            "name_similarity": 0.8,
+            "compare_by_size": False,
+            "size_tolerance": 1,
+            "compare_text_content": False,
+            "content_similarity": 0.9,
+            "phash_preset": "balanced",
+            "use_gpu": True
+        }
+    }
+}
+
+
 class UndoManager:
     """Manages file backup and restore operations for undo functionality"""
     
@@ -647,9 +998,27 @@ class UndoManager:
         except Exception as e:
             logger.error(f"Backup failed: {e}")
             return False
+
+    def record_move(self, original_path, new_path):
+        """Record a move operation for undo."""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            operation = {
+                'type': 'move',
+                'original_path': original_path,
+                'new_path': new_path,
+                'timestamp': timestamp
+            }
+            self.operations.append(operation)
+            if len(self.operations) > self.max_operations:
+                self.operations.pop(0)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to record move: {e}")
+            return False
             
     def undo_last_operation(self):
-        """Restore the last deleted file"""
+        """Undo the last file operation"""
         if not self.operations:
             return False, "No operations to undo"
             
@@ -666,6 +1035,27 @@ class UndoManager:
                 shutil.copy2(operation['backup_path'], operation['original_path'])
                 os.remove(operation['backup_path'])
                 return True, f"Restored: {os.path.basename(operation['original_path'])}"
+
+            if operation['type'] == 'move':
+                original_path = operation['original_path']
+                new_path = operation['new_path']
+                if not os.path.exists(new_path):
+                    return False, f"Moved file not found: {os.path.basename(new_path)}"
+
+                original_dir = os.path.dirname(original_path)
+                if not os.path.exists(original_dir):
+                    os.makedirs(original_dir)
+
+                restore_path = original_path
+                if os.path.exists(restore_path):
+                    base, ext = os.path.splitext(original_path)
+                    counter = 1
+                    while os.path.exists(restore_path):
+                        restore_path = f"{base}_restored_{counter}{ext}"
+                        counter += 1
+
+                shutil.move(new_path, restore_path)
+                return True, f"Restored: {os.path.basename(restore_path)}"
                 
         except Exception as e:
             return False, f"Undo failed: {e}"
@@ -684,7 +1074,7 @@ class UndoManager:
         """Clear all backups and operations"""
         for op in self.operations:
             try:
-                if os.path.exists(op['backup_path']):
+                if op.get('backup_path') and os.path.exists(op['backup_path']):
                     os.remove(op['backup_path'])
             except Exception:
                 pass
@@ -1327,6 +1717,8 @@ class EnhancedScanThread(QThread):
                 
                 is_similar = False
                 similarity_reasons = []
+                name_similar = False
+                size_similar = False
                 
                 # Check for similar videos using video fingerprinting
                 video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpeg', '.mpg'}
@@ -1371,14 +1763,30 @@ class EnhancedScanThread(QThread):
                 
                 # Check various similarity criteria
                 if settings.get('compare_by_name', False):
-                    if FileComparator.compare_by_name(file1, file2, settings.get('name_similarity', 0.8)):
+                    name_similar = FileComparator.compare_by_name(file1, file2, settings.get('name_similarity', 0.8))
+                    if name_similar:
                         is_similar = True
                         similarity_reasons.append("Similar names")
                 
                 if settings.get('compare_by_size', False):
-                    if FileComparator.compare_by_size(file1, file2, settings.get('size_tolerance', 1)):
+                    size_similar = FileComparator.compare_by_size(file1, file2, settings.get('size_tolerance', 1))
+                    if size_similar:
                         is_similar = True
                         similarity_reasons.append("Similar sizes")
+
+                # Same name but different size (explicit step)
+                if name_similar and not size_similar:
+                    try:
+                        name1 = os.path.splitext(os.path.basename(file1))[0].lower()
+                        name2 = os.path.splitext(os.path.basename(file2))[0].lower()
+                        if name1 == name2:
+                            size1 = os.path.getsize(file1)
+                            size2 = os.path.getsize(file2)
+                            if size1 != size2:
+                                is_similar = True
+                                similarity_reasons.append("Same name, different size")
+                    except Exception:
+                        pass
                 
                 if settings.get('compare_text_content', False):
                     if FileComparator.compare_text_similarity(file1, file2, settings.get('content_similarity', 0.9)):
@@ -1386,10 +1794,16 @@ class EnhancedScanThread(QThread):
                         similarity_reasons.append("Similar content")
                 
                 if is_similar:
+                    match_type = "name_size"
+                    if "Same name, different size" in similarity_reasons:
+                        match_type = "same_name_diff_size"
+                    if any(reason.startswith("Similar audio") or reason.startswith("Similar video") or reason.startswith("Similar content") for reason in similarity_reasons):
+                        match_type = "content"
                     key = f"similar_{len(similar_files)}"
                     similar_files[key] = {
                         'files': [file1, file2],
-                        'reasons': similarity_reasons
+                        'reasons': similarity_reasons,
+                        'match_type': match_type
                     }
         
         return dict(similar_files)
@@ -1631,6 +2045,111 @@ class EnterpriseConfigDialog(QDialog):
         }
 
 
+class BulkMoveThread(QThread):
+    progress = pyqtSignal(int, int)  # processed, total
+    status = pyqtSignal(str)
+    result = pyqtSignal(dict)
+
+    def __init__(self, files_to_move, destination):
+        super().__init__()
+        self.files_to_move = files_to_move or []
+        self.destination = destination
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        total = len(self.files_to_move)
+        moved_count = 0
+        failed_files = []
+        moved_pairs = []
+        space_freed = 0
+        cancelled = False
+
+        if not self.destination:
+            self.result.emit({
+                "moved_count": 0,
+                "failed_files": ["No destination set."],
+                "moved_pairs": [],
+                "space_freed": 0,
+                "cancelled": False
+            })
+            return
+
+        try:
+            os.makedirs(self.destination, exist_ok=True)
+        except Exception as e:
+            self.result.emit({
+                "moved_count": 0,
+                "failed_files": [f"Failed to create destination: {e}"],
+                "moved_pairs": [],
+                "space_freed": 0,
+                "cancelled": False
+            })
+            return
+
+        try:
+            free_space = shutil.disk_usage(self.destination).free
+        except Exception:
+            free_space = None
+
+        for idx, file_path in enumerate(self.files_to_move, 1):
+            if self._cancelled:
+                cancelled = True
+                break
+
+            self.progress.emit(idx, total)
+            self.status.emit(f"Moving {os.path.basename(file_path)} ({idx}/{total})")
+
+            try:
+                if not os.path.exists(file_path):
+                    failed_files.append(f"{file_path}: File not found")
+                    continue
+
+                file_size = 0
+                try:
+                    file_size = os.path.getsize(file_path)
+                except Exception:
+                    file_size = 0
+
+                if free_space is not None and file_size > free_space:
+                    failed_files.append(f"{file_path}: Insufficient disk space")
+                    continue
+
+                filename = os.path.basename(file_path)
+                dest_path = os.path.join(self.destination, filename)
+
+                # Handle filename conflicts
+                counter = 1
+                base_name, ext = os.path.splitext(filename)
+                while os.path.exists(dest_path):
+                    new_filename = f"{base_name}_{counter}{ext}"
+                    dest_path = os.path.join(self.destination, new_filename)
+                    counter += 1
+
+                shutil.move(file_path, dest_path)
+                moved_count += 1
+                moved_pairs.append((file_path, dest_path))
+                space_freed += file_size
+
+                if free_space is not None:
+                    free_space -= file_size
+
+            except PermissionError as e:
+                failed_files.append(f"{file_path}: Permission denied ({e})")
+            except Exception as e:
+                failed_files.append(f"{file_path}: {e}")
+
+        self.result.emit({
+            "moved_count": moved_count,
+            "failed_files": failed_files,
+            "moved_pairs": moved_pairs,
+            "space_freed": space_freed,
+            "cancelled": cancelled
+        })
+
+
 class EnhancedDuplicateFinder(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1640,10 +2159,19 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.scan_filters = ScanFilters()
         self.scan_thread = None
         self.scan_start_time = None
+        self.audio_quality_analyzer = AudioQualityAnalyzer()
+        self.audio_extensions = {'.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.m4a', '.opus', '.aiff', '.ape', '.alac', '.wv'}
+        self._quality_cache = {}
         
         # Settings persistence
         self.settings = QSettings("DuplicateFinder", "EnhancedDuplicateFinder")
         self.is_dark_theme = self.settings.value("dark_theme", True, type=bool)
+        self.preset_enabled = self.settings.value("preset_enabled", True, type=bool)
+        self.current_category_key = self.settings.value("preset_category", "general")
+        self.current_preset_mode = self.settings.value("preset_mode", "accuracy")
+        self.current_step_filter = "All"
+        self.similar_step_filter = None
+        self.step_sequence = ["Exact", "Content", "Name/Size"]
         
         # Enterprise configuration
         self.enterprise_config = {
@@ -1751,6 +2279,9 @@ class EnhancedDuplicateFinder(QMainWindow):
         # Settings tab
         self.create_settings_tab()
         
+        # Apply saved smart preset after UI is ready
+        self._apply_selected_preset(initial=True)
+        
         self.directory = None
     
     def create_toolbar(self):
@@ -1758,7 +2289,9 @@ class EnhancedDuplicateFinder(QMainWindow):
         toolbar = QToolBar("Main Toolbar")
         toolbar.setObjectName("MainToolBar")  # Required for saveState/restoreState
         toolbar.setMovable(False)
-        toolbar.setIconSize(QSize(24, 24))
+        toolbar.setIconSize(QSize(20, 20))
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        toolbar.setContentsMargins(6, 6, 6, 6)
         self.addToolBar(toolbar)
         
         # Open folder action
@@ -1767,6 +2300,10 @@ class EnhancedDuplicateFinder(QMainWindow):
         open_action.setToolTip("Select folder to scan (Ctrl+O)")
         open_action.triggered.connect(self.select_directory)
         toolbar.addAction(open_action)
+        open_btn = toolbar.widgetForAction(open_action)
+        if open_btn:
+            open_btn.setMinimumWidth(118)
+            open_btn.setMinimumHeight(38)
         
         # Start scan action
         self.scan_action = QAction("🔍 Scan", self)
@@ -1775,6 +2312,10 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.scan_action.triggered.connect(self.scan_duplicates)
         self.scan_action.setEnabled(False)
         toolbar.addAction(self.scan_action)
+        scan_btn = toolbar.widgetForAction(self.scan_action)
+        if scan_btn:
+            scan_btn.setMinimumWidth(82)
+            scan_btn.setMinimumHeight(38)
         
         toolbar.addSeparator()
         
@@ -1785,6 +2326,10 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.pause_action.triggered.connect(self.toggle_pause)
         self.pause_action.setEnabled(False)
         toolbar.addAction(self.pause_action)
+        pause_btn = toolbar.widgetForAction(self.pause_action)
+        if pause_btn:
+            pause_btn.setMinimumWidth(84)
+            pause_btn.setMinimumHeight(38)
         
         # Cancel action
         self.cancel_action = QAction("⏹️ Stop", self)
@@ -1793,6 +2338,10 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.cancel_action.triggered.connect(self.cancel_scan)
         self.cancel_action.setEnabled(False)
         toolbar.addAction(self.cancel_action)
+        cancel_btn = toolbar.widgetForAction(self.cancel_action)
+        if cancel_btn:
+            cancel_btn.setMinimumWidth(76)
+            cancel_btn.setMinimumHeight(38)
         
         toolbar.addSeparator()
         
@@ -1802,6 +2351,10 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.theme_action.setToolTip("Toggle dark/light theme (Ctrl+T)")
         self.theme_action.triggered.connect(self.toggle_theme)
         toolbar.addAction(self.theme_action)
+        theme_btn = toolbar.widgetForAction(self.theme_action)
+        if theme_btn:
+            theme_btn.setMinimumWidth(124)
+            theme_btn.setMinimumHeight(38)
         
         toolbar.addSeparator()
         
@@ -1810,6 +2363,9 @@ class EnhancedDuplicateFinder(QMainWindow):
         export_btn.setText("📥 Export")
         export_btn.setToolTip("Export results")
         export_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        export_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        export_btn.setMinimumWidth(98)
+        export_btn.setMinimumHeight(38)
         
         export_menu = QMenu(self)
         export_menu.addAction("📄 Export to JSON", self.export_to_json)
@@ -1820,14 +2376,16 @@ class EnhancedDuplicateFinder(QMainWindow):
         
         # Spacer
         spacer = QWidget()
-        spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy(), spacer.sizePolicy().verticalPolicy())
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
         
         # Search in results
-        toolbar.addWidget(QLabel("🔎"))
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search in results...")
-        self.search_edit.setMaximumWidth(200)
+        self.search_edit.setMinimumWidth(240)
+        self.search_edit.setMaximumWidth(320)
+        self.search_edit.setMinimumHeight(38)
+        self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self.filter_results)
         self.search_edit.setToolTip("Filter results by filename (Ctrl+F)")
         toolbar.addWidget(self.search_edit)
@@ -1838,6 +2396,10 @@ class EnhancedDuplicateFinder(QMainWindow):
         help_action.setToolTip("Show keyboard shortcuts (F1)")
         help_action.triggered.connect(self.show_shortcuts_help)
         toolbar.addAction(help_action)
+        help_btn = toolbar.widgetForAction(help_action)
+        if help_btn:
+            help_btn.setMinimumWidth(78)
+            help_btn.setMinimumHeight(38)
         
         # Create menu bar
         self.create_menu_bar()
@@ -1888,9 +2450,9 @@ class EnhancedDuplicateFinder(QMainWindow):
         # Edit menu
         edit_menu = menubar.addMenu("&Edit")
         
-        self.undo_action = QAction("↩️ &Undo Delete", self)
+        self.undo_action = QAction("↩️ &Undo Last Operation", self)
         self.undo_action.setShortcut("Ctrl+Z")
-        self.undo_action.triggered.connect(self.undo_last_delete)
+        self.undo_action.triggered.connect(self.undo_last_operation)
         self.undo_action.setEnabled(False)
         edit_menu.addAction(self.undo_action)
         
@@ -2054,13 +2616,6 @@ class EnhancedDuplicateFinder(QMainWindow):
             self.scan_btn.setEnabled(True)
             self.scan_action.setEnabled(True)
     
-    def closeEvent(self, event):
-        """Save settings on close"""
-        self.settings.setValue("geometry", self.saveGeometry())
-        if self.directory:
-            self.settings.setValue("last_directory", self.directory)
-        event.accept()
-    
     def dragEnterEvent(self, event: QDragEnterEvent):
         """Handle drag enter for folder drop"""
         if event.mimeData().hasUrls():
@@ -2160,17 +2715,42 @@ class EnhancedDuplicateFinder(QMainWindow):
         """Create the scanner configuration tab"""
         scanner_widget = QWidget()
         layout = QVBoxLayout(scanner_widget)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(14)
+
+        label_width = 160
+
+        def make_row_label(text):
+            label = QLabel(text)
+            label.setFixedWidth(label_width)
+            label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            return label
+
+        def make_form_row():
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(14)
+            row_widget.setMinimumHeight(34)
+            return row_widget, row_layout
         
         # Directory selection
         dir_group = QGroupBox("📁 Directory Selection")
         dir_layout = QVBoxLayout(dir_group)
+        dir_layout.setContentsMargins(12, 14, 12, 12)
         
         dir_select_layout = QHBoxLayout()
+        dir_select_layout.setSpacing(12)
         self.select_btn = QPushButton("📁 Select Directory to Scan")
         self.select_btn.clicked.connect(self.select_directory)
+        self.select_btn.setMinimumWidth(260)
+        self.select_btn.setMinimumHeight(40)
         dir_select_layout.addWidget(self.select_btn)
-        
+
         self.dir_label = QLabel("No directory selected")
+        self.dir_label.setWordWrap(True)
+        self.dir_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.dir_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         dir_select_layout.addWidget(self.dir_label)
         dir_layout.addLayout(dir_select_layout)
         
@@ -2179,70 +2759,146 @@ class EnhancedDuplicateFinder(QMainWindow):
         # Move destination selection
         move_group = QGroupBox("📦 Move Destination (Optional)")
         move_layout = QVBoxLayout(move_group)
+        move_layout.setContentsMargins(12, 14, 12, 12)
         
         move_select_layout = QHBoxLayout()
+        move_select_layout.setSpacing(12)
         self.move_dest_btn = QPushButton("📂 Select Move Destination")
         self.move_dest_btn.clicked.connect(self.select_move_destination)
+        self.move_dest_btn.setMinimumWidth(260)
+        self.move_dest_btn.setMinimumHeight(40)
         move_select_layout.addWidget(self.move_dest_btn)
         
-        self.move_dest_label = QLabel("No destination selected (files will be deleted if not set)")
+        self.move_dest_label = QLabel("No destination selected (move actions are disabled)")
+        self.move_dest_label.setWordWrap(True)
+        self.move_dest_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.move_dest_label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         move_select_layout.addWidget(self.move_dest_label)
         move_layout.addLayout(move_select_layout)
         
         layout.addWidget(move_group)
         
+        # Smart presets
+        preset_group = QGroupBox("⚡ Smart Presets (Category + Accuracy/Performance)")
+        preset_layout = QVBoxLayout(preset_group)
+        preset_layout.setContentsMargins(14, 10, 14, 14)
+        preset_layout.setSpacing(10)
+
+        self.preset_enable_cb = QCheckBox("Enable Smart Presets")
+        self.preset_enable_cb.setChecked(self.preset_enabled)
+        self.preset_enable_cb.setMinimumHeight(30)
+        preset_layout.addWidget(self.preset_enable_cb)
+
+        category_row_widget, category_row = make_form_row()
+        category_row.addWidget(make_row_label("Category:"))
+        self.category_combo = QComboBox()
+        for key, data in CATEGORY_PRESETS.items():
+            self.category_combo.addItem(data.get("label", key.capitalize()), key)
+        self.category_combo.setMinimumWidth(260)
+        category_row.addWidget(self.category_combo, 1)
+        preset_layout.addWidget(category_row_widget)
+
+        mode_row_widget, mode_row = make_form_row()
+        mode_row.addWidget(make_row_label("Mode:"))
+        self.preset_mode_combo = QComboBox()
+        self.preset_mode_combo.addItem("Accuracy", "accuracy")
+        self.preset_mode_combo.addItem("Performance", "performance")
+        self.preset_mode_combo.setMinimumWidth(220)
+        mode_row.addWidget(self.preset_mode_combo, 1)
+        preset_layout.addWidget(mode_row_widget)
+
+        # Restore last selections
+        self._set_combo_by_data(self.category_combo, self.current_category_key)
+        self._set_combo_by_data(self.preset_mode_combo, self.current_preset_mode)
+
+        self.preset_desc_label = QLabel("Auto-sets comparison and GPU settings for this category.")
+        self.preset_desc_label.setStyleSheet("color: #999; font-style: italic;")
+        self.preset_desc_label.setWordWrap(True)
+        preset_layout.addWidget(self.preset_desc_label)
+
+        self.preset_enable_cb.stateChanged.connect(self._on_preset_changed)
+        self.category_combo.currentIndexChanged.connect(self._on_preset_changed)
+        self.preset_mode_combo.currentIndexChanged.connect(self._on_preset_changed)
+
+        layout.addWidget(preset_group)
+        
         # Scan filters
         filter_group = QGroupBox("🎛️ Scan Filters")
-        filter_layout = QGridLayout(filter_group)
+        filter_layout = QVBoxLayout(filter_group)
+        filter_layout.setContentsMargins(14, 10, 14, 14)
+        filter_layout.setSpacing(10)
         
         # File type filters
-        filter_layout.addWidget(QLabel("File Types:"), 0, 0)
-        
         self.type_checkboxes = {}
-        type_col = 1
+        file_types_row, file_types_layout = make_form_row()
+        file_types_layout.setSpacing(14)
+        file_types_layout.addWidget(make_row_label("File Types:"))
+        file_types_content = QWidget()
+        file_types_content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        file_types_content_layout = QHBoxLayout(file_types_content)
+        file_types_content_layout.setContentsMargins(0, 0, 0, 0)
+        file_types_content_layout.setSpacing(14)
         for type_name in ['images', 'documents', 'text', 'code', 'audio', 'video', 'archives']:
             cb = QCheckBox(type_name.capitalize())
             cb.setChecked(False)  # Unchecked = scan all types
             self.type_checkboxes[type_name] = cb
-            filter_layout.addWidget(cb, 0, type_col)
-            type_col += 1
+            file_types_content_layout.addWidget(cb)
+        file_types_content_layout.addStretch()
+        file_types_layout.addWidget(file_types_content, 1)
+        filter_layout.addWidget(file_types_row)
         
         # Custom extensions
-        filter_layout.addWidget(QLabel("Custom extensions:"), 1, 0)
+        custom_ext_row, custom_ext_layout = make_form_row()
+        custom_ext_layout.addWidget(make_row_label("Custom extensions:"))
         self.custom_ext_edit = QLineEdit()
         self.custom_ext_edit.setPlaceholderText(".ext1, .ext2 (leave empty for all)")
-        filter_layout.addWidget(self.custom_ext_edit, 1, 1, 1, 4)
+        custom_ext_layout.addWidget(self.custom_ext_edit, 1)
+        filter_layout.addWidget(custom_ext_row)
         
         # Size filters
-        filter_layout.addWidget(QLabel("Min size (KB):"), 2, 0)
+        min_size_row, min_size_layout = make_form_row()
+        min_size_layout.addWidget(make_row_label("Min size (KB):"))
         self.min_size_spin = QSpinBox()
         self.min_size_spin.setRange(0, 1000000)
         self.min_size_spin.setValue(0)
-        filter_layout.addWidget(self.min_size_spin, 2, 1)
+        self.min_size_spin.setMinimumWidth(140)
+        min_size_layout.addWidget(self.min_size_spin)
+        min_size_layout.addStretch()
+        filter_layout.addWidget(min_size_row)
         
-        filter_layout.addWidget(QLabel("Max size (MB):"), 2, 2)
+        max_size_row, max_size_layout = make_form_row()
+        max_size_layout.addWidget(make_row_label("Max size (MB):"))
         self.max_size_spin = QSpinBox()
         self.max_size_spin.setRange(0, 100000)
         self.max_size_spin.setValue(0)  # 0 = no limit
         self.max_size_spin.setSpecialValueText("No limit")
-        filter_layout.addWidget(self.max_size_spin, 2, 3)
+        self.max_size_spin.setMinimumWidth(180)
+        max_size_layout.addWidget(self.max_size_spin)
+        max_size_layout.addStretch()
+        filter_layout.addWidget(max_size_row)
         
         # Excluded folders
-        filter_layout.addWidget(QLabel("Exclude folders:"), 3, 0)
+        exclude_row, exclude_layout = make_form_row()
+        exclude_layout.addWidget(make_row_label("Exclude folders:"))
         self.exclude_folders_edit = QLineEdit()
         self.exclude_folders_edit.setText(", ".join(ScanFilters.EXCLUDE_FOLDERS[:5]))
         self.exclude_folders_edit.setPlaceholderText("node_modules, .git, __pycache__")
-        filter_layout.addWidget(self.exclude_folders_edit, 3, 1, 1, 6)
+        exclude_layout.addWidget(self.exclude_folders_edit, 1)
+        filter_layout.addWidget(exclude_row)
         
         layout.addWidget(filter_group)
         
         # Scan controls
         scan_group = QGroupBox("🔍 Scan Configuration")
-        scan_layout = QGridLayout(scan_group)
+        scan_layout = QVBoxLayout(scan_group)
+        scan_layout.setContentsMargins(14, 10, 14, 14)
+        scan_layout.setSpacing(10)
         
-        scan_layout.addWidget(QLabel("Hash Type:"), 0, 0)
+        hash_row, hash_layout = make_form_row()
+        hash_layout.addWidget(make_row_label("Hash Type:"))
         self.hash_combo = QComboBox()
         self.hash_combo.addItems(["MD5", "SHA256", "Perceptual", "Audio", "Semantic"])
+        self.hash_combo.setMinimumWidth(170)
         self.hash_combo.setToolTip(
             "MD5/SHA256: Exact byte-for-byte matches\n"
             "Perceptual: Similar images/videos (GPU accelerated)\n"
@@ -2250,40 +2906,51 @@ class EnhancedDuplicateFinder(QMainWindow):
             "Semantic: Similar text content (GPU embeddings)"
         )
         self.hash_combo.currentTextChanged.connect(self._on_hash_type_changed)
-        scan_layout.addWidget(self.hash_combo, 0, 1)
+        hash_layout.addWidget(self.hash_combo, 1)
+        scan_layout.addWidget(hash_row)
         
         self.find_similar_cb = QCheckBox("Find similar files (not just exact duplicates)")
         self.find_similar_cb.setChecked(True)
-        scan_layout.addWidget(self.find_similar_cb, 1, 0, 1, 2)
+        self.find_similar_cb.setMinimumHeight(30)
+        scan_layout.addWidget(self.find_similar_cb)
         
         # Scan buttons
         scan_btn_layout = QHBoxLayout()
+        scan_btn_layout.setSpacing(12)
         
         self.scan_btn = QPushButton("🔍 Start Scan")
         self.scan_btn.clicked.connect(self.scan_duplicates)
         self.scan_btn.setEnabled(False)
         self.scan_btn.setToolTip("Start scanning for duplicates (Ctrl+S)")
+        self.scan_btn.setMinimumWidth(160)
+        self.scan_btn.setMinimumHeight(38)
         scan_btn_layout.addWidget(self.scan_btn)
         
         self.pause_btn = QPushButton("⏸️ Pause")
         self.pause_btn.clicked.connect(self.toggle_pause)
         self.pause_btn.setEnabled(False)
         self.pause_btn.setToolTip("Pause or resume the scan (Ctrl+P)")
+        self.pause_btn.setMinimumWidth(120)
+        self.pause_btn.setMinimumHeight(38)
         scan_btn_layout.addWidget(self.pause_btn)
         
         self.cancel_btn = QPushButton("⏹️ Cancel")
         self.cancel_btn.clicked.connect(self.cancel_scan)
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.setToolTip("Cancel the current scan (Escape)")
+        self.cancel_btn.setMinimumWidth(120)
+        self.cancel_btn.setMinimumHeight(38)
         scan_btn_layout.addWidget(self.cancel_btn)
         
-        scan_layout.addLayout(scan_btn_layout, 2, 0, 1, 2)
+        scan_layout.addLayout(scan_btn_layout)
         
         layout.addWidget(scan_group)
         
         # Progress and status
         progress_group = QGroupBox("📊 Progress")
         progress_layout = QVBoxLayout(progress_group)
+        progress_layout.setContentsMargins(12, 10, 12, 12)
+        progress_layout.setSpacing(6)
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -2296,7 +2963,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         progress_details.addWidget(self.status_label)
         
         self.current_file_label = QLabel("")
-        self.current_file_label.setStyleSheet("color: #666;")
+        self.current_file_label.setStyleSheet("color: #999;")
         progress_details.addWidget(self.current_file_label)
         
         progress_details.addStretch()
@@ -2305,7 +2972,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         progress_details.addWidget(self.files_count_label)
         
         self.eta_label = QLabel("")
-        self.eta_label.setStyleSheet("font-weight: bold;")
+        self.eta_label.setStyleSheet("font-weight: bold; color: #4fc3f7;")
         progress_details.addWidget(self.eta_label)
         
         progress_layout.addLayout(progress_details)
@@ -2314,11 +2981,138 @@ class EnhancedDuplicateFinder(QMainWindow):
         layout.addStretch()
         self.tab_widget.addTab(scanner_widget, "🔍 Scanner")
     
+    def _set_combo_by_data(self, combo, data_value):
+        """Set combo box to item matching data value."""
+        if not combo:
+            return
+        for i in range(combo.count()):
+            if combo.itemData(i) == data_value:
+                combo.setCurrentIndex(i)
+                return
+
+    def _on_preset_changed(self):
+        """Apply preset settings when user changes category or mode."""
+        self._apply_selected_preset()
+
+    def _apply_selected_preset(self, initial=False):
+        """Apply the selected smart preset to UI controls."""
+        if hasattr(self, "preset_enable_cb"):
+            self.preset_enabled = self.preset_enable_cb.isChecked()
+        if hasattr(self, "category_combo"):
+            self.current_category_key = self.category_combo.currentData() or self.current_category_key
+        if hasattr(self, "preset_mode_combo"):
+            self.current_preset_mode = self.preset_mode_combo.currentData() or self.current_preset_mode
+
+        self.settings.setValue("preset_enabled", self.preset_enabled)
+        self.settings.setValue("preset_category", self.current_category_key)
+        self.settings.setValue("preset_mode", self.current_preset_mode)
+
+        preset_bucket = CATEGORY_PRESETS.get(self.current_category_key, CATEGORY_PRESETS["general"])
+        preset_config = preset_bucket.get(self.current_preset_mode, preset_bucket["accuracy"])
+
+        if self.preset_enabled:
+            self._apply_preset_to_controls(preset_config, preset_bucket.get("types", []))
+
+        if hasattr(self, "preset_desc_label"):
+            mode_label = "Accuracy" if self.current_preset_mode == "accuracy" else "Performance"
+            desc = f"{preset_bucket.get('label', 'Category')} · {mode_label}"
+            self.preset_desc_label.setText(f"{desc} — auto-sets filters, similarity, and GPU options.")
+
+    def _apply_preset_to_controls(self, preset_config, category_types):
+        """Apply preset config to scan and similarity UI controls."""
+        # File type checkboxes
+        if hasattr(self, "type_checkboxes"):
+            for cb in self.type_checkboxes.values():
+                cb.setChecked(False)
+            for t in category_types:
+                if t in self.type_checkboxes:
+                    self.type_checkboxes[t].setChecked(True)
+
+        # Scan settings
+        if hasattr(self, "hash_combo"):
+            self.hash_combo.setCurrentText(preset_config.get("hash_type", "MD5"))
+        if hasattr(self, "find_similar_cb"):
+            self.find_similar_cb.setChecked(preset_config.get("find_similar", True))
+
+        # Similarity settings
+        if hasattr(self, "compare_by_name_cb"):
+            self.compare_by_name_cb.setChecked(preset_config.get("compare_by_name", True))
+        if hasattr(self, "name_similarity_slider"):
+            self.name_similarity_slider.setValue(int(preset_config.get("name_similarity", 0.8) * 100))
+        if hasattr(self, "compare_by_size_cb"):
+            self.compare_by_size_cb.setChecked(preset_config.get("compare_by_size", True))
+        if hasattr(self, "size_tolerance_spin"):
+            self.size_tolerance_spin.setValue(int(preset_config.get("size_tolerance", 1)))
+        if hasattr(self, "compare_text_content_cb"):
+            self.compare_text_content_cb.setChecked(preset_config.get("compare_text_content", False))
+        if hasattr(self, "content_similarity_slider"):
+            self.content_similarity_slider.setValue(int(preset_config.get("content_similarity", 0.9) * 100))
+
+        # Perceptual hash preset
+        if hasattr(self, "phash_preset_combo"):
+            desired = preset_config.get("phash_preset", "balanced")
+            for i in range(self.phash_preset_combo.count()):
+                if self.phash_preset_combo.itemData(i) == desired:
+                    self.phash_preset_combo.setCurrentIndex(i)
+                    break
+
+        # GPU toggles (auto-enable when available)
+        if HAS_CUDA and hasattr(self, "use_gpu_cb"):
+            self.use_gpu_cb.setChecked(bool(preset_config.get("use_gpu", True)))
+        if HAS_CUDA and hasattr(self, "use_gpu_hashing_cb"):
+            self.use_gpu_hashing_cb.setChecked(bool(preset_config.get("use_gpu", True)))
+
     def create_results_tab(self):
         """Create the results display tab"""
         results_widget = QWidget()
         layout = QVBoxLayout(results_widget)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
         
+        # Stepwise workflow controls
+        step_group = QGroupBox("🧭 Stepwise Workflow")
+        step_layout = QHBoxLayout(step_group)
+        step_layout.setSpacing(8)
+
+        self.step_buttons = {}
+        self.step_button_group = QButtonGroup()
+        self.step_button_group.setExclusive(True)
+
+        step_definitions = [
+            ("All", "All Results"),
+            ("Exact", "Step 1: Exact Duplicates"),
+            ("Content", "Step 2: Same Content"),
+            ("Name/Size", "Step 3: Name/Size Similarity"),
+            ("SameNameDiffSize", "Step 3b: Same Name ≠ Size")
+        ]
+
+        for step_key, label in step_definitions:
+            btn = QToolButton()
+            btn.setText(label)
+            btn.setCheckable(True)
+            btn.setMinimumHeight(36)
+            btn.clicked.connect(lambda _, s=step_key: self._set_step_filter(s))
+            self.step_buttons[step_key] = btn
+            self.step_button_group.addButton(btn)
+            step_layout.addWidget(btn)
+
+        self.prev_step_btn = QPushButton("◀ Prev Step")
+        self.prev_step_btn.clicked.connect(lambda: self._cycle_step(-1))
+        self.prev_step_btn.setMinimumHeight(36)
+        step_layout.addWidget(self.prev_step_btn)
+
+        self.next_step_btn = QPushButton("Next Step ▶")
+        self.next_step_btn.clicked.connect(lambda: self._cycle_step(1))
+        self.next_step_btn.setMinimumHeight(36)
+        step_layout.addWidget(self.next_step_btn)
+
+        step_layout.addStretch()
+        self.step_status_label = QLabel("All results")
+        self.step_status_label.setStyleSheet("color: #999;")
+        step_layout.addWidget(self.step_status_label)
+
+        layout.addWidget(step_group)
+
         # Results tabs
         self.results_tabs = QTabWidget()
         layout.addWidget(self.results_tabs)
@@ -2330,59 +3124,155 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.create_similar_results()
         
         # Action buttons
-        actions_layout = QHBoxLayout()
+        actions_container = QVBoxLayout()
+        actions_container.setSpacing(10)
+        actions_row_top = QHBoxLayout()
+        actions_row_top.setSpacing(10)
+        actions_row_bottom = QHBoxLayout()
+        actions_row_bottom.setSpacing(10)
         
         self.delete_selected_btn = QPushButton("🗑️ Delete Selected")
         self.delete_selected_btn.clicked.connect(self.delete_selected_files)
         self.delete_selected_btn.setEnabled(False)
-        actions_layout.addWidget(self.delete_selected_btn)
+        self.delete_selected_btn.setMinimumHeight(38)
+        actions_row_top.addWidget(self.delete_selected_btn)
         
         self.recycle_selected_btn = QPushButton("♻️ Send to Recycle Bin")
         self.recycle_selected_btn.clicked.connect(self.recycle_selected_files)
         self.recycle_selected_btn.setEnabled(False)
         self.recycle_selected_btn.setToolTip("Safely move files to Recycle Bin (recoverable)")
+        self.recycle_selected_btn.setMinimumHeight(38)
         if not HAS_SEND2TRASH:
             self.recycle_selected_btn.setEnabled(False)
             self.recycle_selected_btn.setToolTip("Install send2trash package: pip install send2trash")
-        actions_layout.addWidget(self.recycle_selected_btn)
+        actions_row_top.addWidget(self.recycle_selected_btn)
         
         self.move_selected_btn = QPushButton("📦 Move Selected")
         self.move_selected_btn.clicked.connect(self.move_selected_files)
         self.move_selected_btn.setEnabled(False)
-        actions_layout.addWidget(self.move_selected_btn)
+        self.move_selected_btn.setMinimumHeight(38)
+        actions_row_top.addWidget(self.move_selected_btn)
+
+        self.bulk_move_btn = QPushButton("🚀 Bulk Move Duplicates")
+        self.bulk_move_btn.clicked.connect(self.show_bulk_move_preview)
+        self.bulk_move_btn.setEnabled(False)
+        self.bulk_move_btn.setToolTip("Move all duplicates while keeping one original per group")
+        self.bulk_move_btn.setStyleSheet("background-color: #2e7d32; color: white; padding: 8px 16px;")
+        self.bulk_move_btn.setMinimumHeight(38)
+        actions_row_top.addWidget(self.bulk_move_btn)
+
+        self.audio_smart_move_btn = QPushButton("🎵 Audio Smart Move")
+        self.audio_smart_move_btn.clicked.connect(self.show_audio_move_preview)
+        self.audio_smart_move_btn.setEnabled(False)
+        self.audio_smart_move_btn.setToolTip("Keep the best quality audio in each duplicate group")
+        self.audio_smart_move_btn.setStyleSheet("background-color: #6a1b9a; color: white; padding: 8px 16px;")
+        self.audio_smart_move_btn.setMinimumHeight(38)
+        actions_row_top.addWidget(self.audio_smart_move_btn)
+        actions_row_top.addStretch()
         
         self.select_all_btn = QPushButton("☑️ Select All")
         self.select_all_btn.clicked.connect(self.select_all_in_group)
-        actions_layout.addWidget(self.select_all_btn)
+        self.select_all_btn.setMinimumHeight(36)
+        actions_row_bottom.addWidget(self.select_all_btn)
         
         self.clear_selection_btn = QPushButton("☐ Clear")
         self.clear_selection_btn.clicked.connect(self.clear_selection)
-        actions_layout.addWidget(self.clear_selection_btn)
+        self.clear_selection_btn.setMinimumHeight(36)
+        actions_row_bottom.addWidget(self.clear_selection_btn)
         
         # Visual separator
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.VLine)
         separator.setFrameShadow(QFrame.Shadow.Sunken)
-        actions_layout.addWidget(separator)
+        actions_row_bottom.addWidget(separator)
         
         # Bulk delete all duplicates button
         self.bulk_delete_btn = QPushButton("🗑️ Delete All Duplicates...")
         self.bulk_delete_btn.clicked.connect(self.show_bulk_delete_preview)
         self.bulk_delete_btn.setEnabled(False)
         self.bulk_delete_btn.setToolTip("Preview and delete all duplicates at once (keeps one per group)")
-        actions_layout.addWidget(self.bulk_delete_btn)
+        self.bulk_delete_btn.setMinimumHeight(36)
+        actions_row_bottom.addWidget(self.bulk_delete_btn)
         
-        actions_layout.addStretch()
+        actions_row_bottom.addStretch()
         
         # Export button
         self.export_btn = QPushButton("📥 Export Results")
         self.export_btn.clicked.connect(self.show_export_menu)
-        actions_layout.addWidget(self.export_btn)
+        self.export_btn.setMinimumHeight(36)
+        self.export_btn.setMinimumWidth(140)
+        actions_row_bottom.addWidget(self.export_btn)
         
-        layout.addLayout(actions_layout)
+        actions_container.addLayout(actions_row_top)
+        actions_container.addLayout(actions_row_bottom)
+        layout.addLayout(actions_container)
         
         self.tab_widget.addTab(results_widget, "📋 Results")
     
+    def _set_step_filter(self, step_name):
+        """Set current workflow step and refresh results."""
+        self.current_step_filter = step_name
+
+        if step_name == "Exact":
+            self.similar_step_filter = None
+            self.results_tabs.setCurrentIndex(0)
+            self.step_status_label.setText("Showing exact duplicates only")
+        elif step_name == "Content":
+            self.similar_step_filter = {"content"}
+            self.results_tabs.setCurrentIndex(1)
+            self.step_status_label.setText("Showing same-content matches")
+        elif step_name == "Name/Size":
+            self.similar_step_filter = {"name_size", "same_name_diff_size"}
+            self.results_tabs.setCurrentIndex(1)
+            self.step_status_label.setText("Showing name/size similarity matches")
+        elif step_name == "SameNameDiffSize":
+            self.similar_step_filter = {"same_name_diff_size"}
+            self.results_tabs.setCurrentIndex(1)
+            self.step_status_label.setText("Showing same name, different size matches")
+        else:
+            self.similar_step_filter = None
+            self.step_status_label.setText("Showing all results")
+
+        self.populate_duplicate_groups()
+        self.populate_similar_groups()
+
+    def _cycle_step(self, direction):
+        """Move to previous or next workflow step."""
+        steps = ["Exact", "Content", "Name/Size", "SameNameDiffSize"]
+        if self.current_step_filter in steps:
+            idx = steps.index(self.current_step_filter)
+        else:
+            idx = 0 if direction > 0 else len(steps) - 1
+        idx = max(0, min(len(steps) - 1, idx + direction))
+        next_step = steps[idx]
+        if next_step in self.step_buttons:
+            self.step_buttons[next_step].setChecked(True)
+        self._set_step_filter(next_step)
+
+    def _update_step_counts(self):
+        """Update step buttons with counts."""
+        exact_count = len(self.duplicates) if hasattr(self, "duplicates") else 0
+        content_count = 0
+        name_size_count = 0
+        same_name_diff_size_count = 0
+        for group in self.similar_files.values() if hasattr(self, "similar_files") else []:
+            match_type = group.get("match_type", "")
+            if match_type == "content":
+                content_count += 1
+            elif match_type == "name_size":
+                name_size_count += 1
+            elif match_type == "same_name_diff_size":
+                same_name_diff_size_count += 1
+
+        if "Exact" in self.step_buttons:
+            self.step_buttons["Exact"].setText(f"Step 1: Exact ({exact_count})")
+        if "Content" in self.step_buttons:
+            self.step_buttons["Content"].setText(f"Step 2: Content ({content_count})")
+        if "Name/Size" in self.step_buttons:
+            self.step_buttons["Name/Size"].setText(f"Step 3: Name/Size ({name_size_count + same_name_diff_size_count})")
+        if "SameNameDiffSize" in self.step_buttons:
+            self.step_buttons["SameNameDiffSize"].setText(f"Step 3b: Same Name ≠ Size ({same_name_diff_size_count})")
+
     def create_duplicates_results(self):
         """Create exact duplicates results view"""
         duplicates_widget = QWidget()
@@ -2408,6 +3298,7 @@ class EnhancedDuplicateFinder(QMainWindow):
             "Oldest First",
             "Name (A-Z)"
         ])
+        self.sort_combo.setMinimumWidth(180)
         self.sort_combo.currentTextChanged.connect(self._on_sort_changed)
         self.sort_combo.setToolTip("Sort duplicate groups by different criteria")
         groups_header.addWidget(self.sort_combo)
@@ -2423,8 +3314,10 @@ class EnhancedDuplicateFinder(QMainWindow):
             "Audio",
             "Archives",
             "Code",
-            "Text"
+            "Text",
+            "Other"
         ])
+        self.file_type_filter.setMinimumWidth(150)
         self.file_type_filter.currentTextChanged.connect(self._on_file_type_filter_changed)
         self.file_type_filter.setToolTip("Filter results by file type")
         groups_header.addWidget(self.file_type_filter)
@@ -2444,7 +3337,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         files_layout.addWidget(QLabel("📄 Files in Group (⭐ = Suggested to Keep):"))
         
         self.duplicate_files_tree = QTreeWidget()
-        self.duplicate_files_tree.setHeaderLabels(["☐", "File Name", "Path", "Size", "Modified"])
+        self.duplicate_files_tree.setHeaderLabels(["☐", "File Name", "Path", "Type", "Quality", "Details", "Size", "Modified"])
         self.duplicate_files_tree.itemChanged.connect(self.update_selection_buttons)
         self.duplicate_files_tree.currentItemChanged.connect(self.show_file_preview)
         files_layout.addWidget(self.duplicate_files_tree)
@@ -2493,7 +3386,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         files_layout.addWidget(QLabel("📄 Similar Files (⭐ = Suggested to Keep):"))
         
         self.similar_files_tree = QTreeWidget()
-        self.similar_files_tree.setHeaderLabels(["☐", "File Name", "Path", "Size", "Modified"])
+        self.similar_files_tree.setHeaderLabels(["☐", "File Name", "Path", "Type", "Quality", "Details", "Size", "Modified"])
         self.similar_files_tree.itemChanged.connect(self.update_selection_buttons)
         self.similar_files_tree.currentItemChanged.connect(self.show_file_preview)
         files_layout.addWidget(self.similar_files_tree)
@@ -2515,6 +3408,11 @@ class EnhancedDuplicateFinder(QMainWindow):
         layout.addWidget(splitter)
         
         self.results_tabs.addTab(similar_widget, "🔍 Similar Files")
+
+        # Default step selection
+        if "All" in self.step_buttons:
+            self.step_buttons["All"].setChecked(True)
+            self._set_step_filter("All")
     
     def create_settings_tab(self):
         """Create settings configuration tab"""
@@ -2775,6 +3673,7 @@ class EnhancedDuplicateFinder(QMainWindow):
             self.move_dest_label.setText(f"📦 Files will be moved to: {destination}")
             self.status_label.setText(f"Move destination set: {destination}")
             self.status_bar.showMessage(f"Move destination: {destination}", 3000)
+            self._update_bulk_operation_buttons()
     
     def get_comparison_settings(self):
         """Get current comparison settings"""
@@ -2851,6 +3750,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.similar_groups_tree.clear()
         self.duplicate_files_tree.clear()
         self.similar_files_tree.clear()
+        self._update_bulk_operation_buttons()
         
         # Get comparison settings and filters
         comparison_settings = self.get_comparison_settings()
@@ -2948,6 +3848,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         # Populate results
         self.populate_duplicate_groups()
         self.populate_similar_groups()
+        self._update_step_counts()
         
         # Show summary
         total_duplicates = sum(len(files) for files in duplicates.values())
@@ -2968,6 +3869,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         
         # Enable bulk delete button if duplicates found
         self.bulk_delete_btn.setEnabled(bool(duplicates))
+        self._update_bulk_operation_buttons()
         
         if duplicates or similar_files:
             QMessageBox.information(self, "Scan Complete", summary)
@@ -3041,10 +3943,9 @@ class EnhancedDuplicateFinder(QMainWindow):
         Suggest which file to keep from a group of duplicates.
         
         Scoring criteria (higher = keep):
-        - Shorter path (less nested, likely original)
-        - Older file (likely original)
-        - Larger file size (for media, might be higher quality)
-        - More descriptive filename
+        - Higher quality score (resolution/bitrate when available)
+        - Larger file size
+        - Older file (original)
         """
         if not files:
             return None
@@ -3055,40 +3956,18 @@ class EnhancedDuplicateFinder(QMainWindow):
                 continue
             try:
                 stat = os.stat(f)
-                basename = os.path.basename(f)
-                
-                # Scoring
-                score = 0
-                
-                # Shorter path = likely more "root" location
-                path_depth = f.count(os.sep)
-                score -= path_depth * 10  # Lower depth = higher score
-                
-                # Older file = likely original
-                age = time.time() - stat.st_mtime
-                score += min(age / 86400, 365)  # Days old, capped at 1 year
-                
-                # Longer filename = more descriptive (up to a point)
-                name_len = len(os.path.splitext(basename)[0])
-                if 5 <= name_len <= 50:
-                    score += name_len * 0.5
-                
-                # Penalize generic names
-                generic_names = ['copy', 'backup', 'duplicate', '(1)', '(2)', '_1', '_2', 'temp', 'tmp']
-                for gen in generic_names:
-                    if gen.lower() in basename.lower():
-                        score -= 50
-                
-                scored_files.append((f, score, stat))
+                quality = self._get_quality_score(f)
+                size = stat.st_size
+                scored_files.append((quality, size, -stat.st_mtime, f))
             except Exception:
                 continue
         
         if not scored_files:
             return files[0] if files else None
         
-        # Return file with highest score
-        scored_files.sort(key=lambda x: x[1], reverse=True)
-        return scored_files[0][0]
+        # Return file with highest quality, then size, then oldest
+        scored_files.sort(reverse=True)
+        return scored_files[0][3]
     
     def populate_duplicate_groups(self):
         """Populate the duplicate groups tree with sorting and filtering"""
@@ -3127,9 +4006,13 @@ class EnhancedDuplicateFinder(QMainWindow):
             group_item.setText(2, self.format_file_size(total_size))
             group_item.setData(0, Qt.ItemDataRole.UserRole, hash_val)
             
-            # Store suggested keep file
+            # Store suggested keep file + tooltip
             suggested = self._suggest_file_to_keep(files)
             group_item.setData(1, Qt.ItemDataRole.UserRole, suggested)
+            if suggested:
+                qinfo = self._get_quality_info(suggested)
+                tooltip = f"Keep: {os.path.basename(suggested)} | {qinfo.get('category','other').capitalize()} | {qinfo.get('details','N/A')}"
+                group_item.setToolTip(0, tooltip)
             
             self.groups_tree.addTopLevelItem(group_item)
         
@@ -3147,11 +4030,29 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.similar_groups_tree.clear()
         
         for i, (key, group_data) in enumerate(self.similar_files.items()):
+            if self.similar_step_filter:
+                match_type = group_data.get("match_type")
+                if match_type not in self.similar_step_filter:
+                    continue
             group_item = QTreeWidgetItem()
-            group_item.setText(0, f"Similar Group {i+1}")
-            group_item.setText(1, ", ".join(group_data['reasons']))
-            group_item.setText(2, str(len(group_data['files'])))
+            match_type = group_data.get("match_type", "")
+            if match_type == "content":
+                label = "Content Group"
+            elif match_type == "same_name_diff_size":
+                label = "Same Name ≠ Size"
+            elif match_type == "name_size":
+                label = "Name/Size Group"
+            else:
+                label = "Similar Group"
+            group_item.setText(0, f"{label} {i+1}")
+            group_item.setText(1, ", ".join(group_data.get('reasons', [])))
+            group_item.setText(2, str(len(group_data.get('files', []))))
             group_item.setData(0, Qt.ItemDataRole.UserRole, key)
+            suggested = self._suggest_file_to_keep(group_data.get("files", []))
+            if suggested:
+                qinfo = self._get_quality_info(suggested)
+                tooltip = f"Keep: {os.path.basename(suggested)} | {qinfo.get('category','other').capitalize()} | {qinfo.get('details','N/A')}"
+                group_item.setToolTip(0, tooltip)
             
             self.similar_groups_tree.addTopLevelItem(group_item)
     
@@ -3163,6 +4064,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         hash_val = current.data(0, Qt.ItemDataRole.UserRole)
         suggested_keep = current.data(1, Qt.ItemDataRole.UserRole)
         files = self.duplicates.get(hash_val, [])
+        suggested_keep = self._suggest_file_to_keep(files)
         
         self.duplicate_files_tree.clear()
         
@@ -3171,21 +4073,29 @@ class EnhancedDuplicateFinder(QMainWindow):
         for file_path in files:
             try:
                 stat = os.stat(file_path)
+                quality_info = self._get_quality_info(file_path)
                 file_infos.append({
                     'path': file_path,
                     'name': os.path.basename(file_path),
                     'size': stat.st_size,
                     'mtime': stat.st_mtime,
-                    'is_suggested': file_path == suggested_keep
+                    'is_suggested': file_path == suggested_keep,
+                    'type': quality_info.get("category", "other"),
+                    'quality': quality_info.get("score", 0.0),
+                    'details': quality_info.get("details", "N/A")
                 })
             except Exception:
+                quality_info = self._get_quality_info(file_path)
                 file_infos.append({
                     'path': file_path,
                     'name': os.path.basename(file_path),
-                    'size': 0,
-                    'mtime': 0,
-                    'is_suggested': file_path == suggested_keep
-                })
+                'size': 0,
+                'mtime': 0,
+                'is_suggested': file_path == suggested_keep,
+                'type': quality_info.get("category", "other"),
+                'quality': quality_info.get("score", 0.0),
+                'details': quality_info.get("details", "N/A")
+            })
         
         # Sort: suggested keep first, then by modification time (oldest first)
         file_infos.sort(key=lambda x: (not x['is_suggested'], x['mtime']))
@@ -3207,14 +4117,17 @@ class EnhancedDuplicateFinder(QMainWindow):
                 item.setText(1, info['name'])
             
             item.setText(2, info['path'])
-            item.setText(3, self.format_file_size(info['size']))
+            item.setText(3, info['type'].capitalize())
+            item.setText(4, f"{info['quality']:.2f}")
+            item.setText(5, info['details'])
+            item.setText(6, self.format_file_size(info['size']))
             
             # Add modification date
             if info['mtime'] > 0:
                 mod_date = datetime.fromtimestamp(info['mtime']).strftime('%Y-%m-%d %H:%M')
-                item.setText(4, mod_date)
+                item.setText(7, mod_date)
             else:
-                item.setText(4, "Unknown")
+                item.setText(7, "Unknown")
             
             item.setData(0, Qt.ItemDataRole.UserRole, info['path'])
             self.duplicate_files_tree.addTopLevelItem(item)
@@ -3231,6 +4144,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         group_key = current.data(0, Qt.ItemDataRole.UserRole)
         group_data = self.similar_files.get(group_key, {})
         files = group_data.get('files', [])
+        suggested_keep = self._suggest_file_to_keep(files)
         
         self.similar_files_tree.clear()
         
@@ -3239,32 +4153,39 @@ class EnhancedDuplicateFinder(QMainWindow):
         for file_path in files:
             try:
                 stat = os.stat(file_path)
+                quality_info = self._get_quality_info(file_path)
                 file_infos.append({
                     'path': file_path,
                     'name': os.path.basename(file_path),
                     'size': stat.st_size,
-                    'mtime': stat.st_mtime
+                    'mtime': stat.st_mtime,
+                    'is_suggested': file_path == suggested_keep,
+                    'type': quality_info.get("category", "other"),
+                    'quality': quality_info.get("score", 0.0),
+                    'details': quality_info.get("details", "N/A")
                 })
             except Exception:
+                quality_info = self._get_quality_info(file_path)
                 file_infos.append({
                     'path': file_path,
                     'name': os.path.basename(file_path),
                     'size': 0,
-                    'mtime': 0
+                    'mtime': 0,
+                    'is_suggested': file_path == suggested_keep,
+                    'type': quality_info.get("category", "other"),
+                    'quality': quality_info.get("score", 0.0),
+                    'details': quality_info.get("details", "N/A")
                 })
         
-        # Sort by size (largest first) then by name
-        file_infos.sort(key=lambda x: (-x['size'], x['name'].lower()))
-        
-        # Determine suggested file to keep (first file after sorting = largest)
-        suggested_keep = file_infos[0]['path'] if file_infos else None
+        # Sort: suggested keep first, then by size
+        file_infos.sort(key=lambda x: (not x['is_suggested'], -x['size'], x['name'].lower()))
         
         for info in file_infos:
             item = QTreeWidgetItem()
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             
             # Suggested keep: don't pre-check, mark with ⭐
-            if info['path'] == suggested_keep:
+            if info['is_suggested']:
                 item.setCheckState(0, Qt.CheckState.Unchecked)
                 item.setText(1, f"⭐ {info['name']}")
                 font = item.font(1)
@@ -3275,14 +4196,17 @@ class EnhancedDuplicateFinder(QMainWindow):
                 item.setText(1, info['name'])
             
             item.setText(2, info['path'])
-            item.setText(3, self.format_file_size(info['size']))
+            item.setText(3, info['type'].capitalize())
+            item.setText(4, f"{info['quality']:.2f}")
+            item.setText(5, info['details'])
+            item.setText(6, self.format_file_size(info['size']))
             
             # Add modification date
             if info['mtime'] > 0:
                 mod_date = datetime.fromtimestamp(info['mtime']).strftime('%Y-%m-%d %H:%M')
-                item.setText(4, mod_date)
+                item.setText(7, mod_date)
             else:
-                item.setText(4, "Unknown")
+                item.setText(7, "Unknown")
             
             item.setData(0, Qt.ItemDataRole.UserRole, info['path'])
             self.similar_files_tree.addTopLevelItem(item)
@@ -3362,7 +4286,76 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.delete_selected_btn.setEnabled(has_selection)
         self.recycle_selected_btn.setEnabled(has_selection and HAS_SEND2TRASH)
         self.move_selected_btn.setEnabled(has_selection and self.move_destination is not None)
-    
+        self._update_bulk_operation_buttons()
+
+    def _update_bulk_operation_buttons(self):
+        """Update bulk operation button states based on current context."""
+        has_duplicates = bool(getattr(self, 'duplicates', {}))
+        has_destination = self.move_destination is not None
+        self.bulk_move_btn.setEnabled(has_duplicates and has_destination)
+        self.audio_smart_move_btn.setEnabled(has_duplicates and has_destination and self._has_audio_duplicates())
+
+    def _is_audio_file(self, file_path):
+        ext = os.path.splitext(file_path)[1].lower()
+        return ext in self.audio_extensions
+
+    def _has_audio_duplicates(self):
+        """Check if any duplicate group contains at least two audio files."""
+        for files in self.duplicates.values():
+            audio_files = [f for f in files if self._is_audio_file(f)]
+            if len(audio_files) >= 2:
+                return True
+        return False
+
+    def _get_quality_score(self, file_path):
+        """Compute a quality score for keep-best decisions."""
+        info = self._get_quality_info(file_path)
+        return info.get("score", 0.0)
+
+    def _get_quality_info(self, file_path):
+        """Get quality score and display details for a file."""
+        cached = self._quality_cache.get(file_path)
+        if isinstance(cached, dict):
+            return cached
+
+        score = 0.0
+        details = "N/A"
+        category = self._get_file_type_category(file_path).lower()
+
+        try:
+            if category == "audio":
+                meta = self.audio_quality_analyzer.analyze_audio_quality(file_path)
+                if meta and isinstance(meta, dict):
+                    score = float(meta.get("quality_score", 0.0))
+                    fmt = meta.get("format", "unknown").upper()
+                    bitrate = meta.get("bitrate_kbps", 0)
+                    sample_rate = meta.get("sample_rate_hz", 0)
+                    details = f"{fmt} • {bitrate:.0f} kbps • {sample_rate / 1000:.1f} kHz"
+            elif category == "images" and HAS_PILLOW:
+                with Image.open(file_path) as img:
+                    width, height = img.size
+                    score = (width * height) / 1_000_000.0
+                    details = f"{width}x{height}"
+            elif category == "videos" and HAS_CV2:
+                cap = cv2.VideoCapture(file_path)
+                if cap.isOpened():
+                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    score = (width * height) / 1_000_000.0
+                    details = f"{width}x{height}"
+                cap.release()
+        except Exception:
+            score = 0.0
+            details = "N/A"
+
+        info = {
+            "score": score,
+            "details": details,
+            "category": category
+        }
+        self._quality_cache[file_path] = info
+        return info
+
     def has_selected_files(self):
         """Check if any files are selected in either tree"""
         # Check duplicate files tree
@@ -3525,7 +4518,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         # Create preview dialog
         dialog = QDialog(self)
         dialog.setWindowTitle("🗑️ Bulk Delete Duplicates - Preview")
-        dialog.resize(800, 600)
+        dialog.resize(1000, 600)
         
         layout = QVBoxLayout(dialog)
         
@@ -3540,7 +4533,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         
         # Preview tree - show what will be kept and deleted
         preview_tree = QTreeWidget()
-        preview_tree.setHeaderLabels(["File", "Action", "Size", "Path"])
+        preview_tree.setHeaderLabels(["File", "Action", "Type", "Quality", "Details", "Size", "Path"])
         preview_tree.setAlternatingRowColors(True)
         
         for hash_val, files in self.duplicates.items():
@@ -3563,12 +4556,17 @@ class EnhancedDuplicateFinder(QMainWindow):
                     item.setText(1, "🗑️ DELETE")
                     item.setForeground(1, QColor(200, 0, 0))  # Red
                 
+                info = self._get_quality_info(f)
+                item.setText(2, info.get("category", "other").capitalize())
+                item.setText(3, f"{info.get('score', 0.0):.2f}")
+                item.setText(4, info.get("details", "N/A"))
+
                 try:
-                    item.setText(2, self.format_file_size(os.path.getsize(f)))
+                    item.setText(5, self.format_file_size(os.path.getsize(f)))
                 except OSError:
-                    item.setText(2, "Unknown")
+                    item.setText(5, "Unknown")
                 
-                item.setText(3, os.path.dirname(f))
+                item.setText(6, os.path.dirname(f))
         
         preview_tree.expandAll()
         for i in range(preview_tree.columnCount()):
@@ -3718,6 +4716,505 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.refresh_current_view()
 
     
+    def show_bulk_move_preview(self):
+        """Show preview dialog for bulk moving all duplicates (keeps one per group)"""
+        if not self.duplicates:
+            QMessageBox.warning(self, "No Duplicates", "No duplicate files found to process.")
+            return
+        if not self.move_destination:
+            QMessageBox.warning(self, "Warning", "Please select a move destination first")
+            return
+
+        files_to_keep = []
+        files_to_move = []
+        total_space_freed = 0
+        group_plans = []
+
+        for hash_val, files in self.duplicates.items():
+            if len(files) < 2:
+                continue
+            keep_file = self._suggest_file_to_keep(files)
+            if keep_file:
+                files_to_keep.append((keep_file, "Best quality/size/oldest"))
+
+            for f in files:
+                if f == keep_file:
+                    continue
+                files_to_move.append(f)
+                try:
+                    total_space_freed += os.path.getsize(f)
+                except Exception:
+                    pass
+
+            group_plans.append({
+                "files": files,
+                "keep": keep_file,
+                "reason": "Best quality/size/oldest"
+            })
+
+        if not files_to_move:
+            QMessageBox.information(self, "Nothing to Move", "No duplicate files to move.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("🚀 Bulk Move Duplicates - Preview")
+        dialog.resize(1050, 650)
+
+        layout = QVBoxLayout(dialog)
+
+        summary_group = QGroupBox("📊 Summary")
+        summary_layout = QVBoxLayout(summary_group)
+        summary_layout.addWidget(QLabel(f"<b>Groups to process:</b> {len(group_plans)}"))
+        summary_layout.addWidget(QLabel(f"<b>Files to KEEP:</b> {len(files_to_keep)} (kept in place)"))
+        summary_layout.addWidget(QLabel(f"<b>Files to MOVE:</b> {len(files_to_move)}"))
+        summary_layout.addWidget(QLabel(f"<b>Space to free:</b> {self.format_file_size(total_space_freed)}"))
+        summary_layout.addWidget(QLabel(f"<b>Destination:</b> {self.move_destination}"))
+        layout.addWidget(summary_group)
+
+        preview_tree = QTreeWidget()
+        preview_tree.setHeaderLabels(["File", "Action", "Reason", "Type", "Quality", "Details", "Size", "Path"])
+        preview_tree.setAlternatingRowColors(True)
+
+        for group in group_plans:
+            files = group["files"]
+            keep_file = group["keep"]
+            group_item = QTreeWidgetItem()
+            group_item.setText(0, f"📁 Group ({len(files)} files)")
+            preview_tree.addTopLevelItem(group_item)
+
+            for f in files:
+                item = QTreeWidgetItem(group_item)
+                item.setText(0, os.path.basename(f))
+
+                if f == keep_file:
+                    item.setText(1, "⭐ KEEP")
+                    item.setText(2, group["reason"])
+                    item.setForeground(1, QColor(0, 150, 0))
+                    font = item.font(0)
+                    font.setBold(True)
+                    item.setFont(0, font)
+                else:
+                    item.setText(1, "📦 MOVE")
+                    item.setText(2, "Duplicate")
+                    item.setForeground(1, QColor(200, 120, 0))
+
+                info = self._get_quality_info(f)
+                item.setText(3, info.get("category", "other").capitalize())
+                item.setText(4, f"{info.get('score', 0.0):.2f}")
+                item.setText(5, info.get("details", "N/A"))
+
+                try:
+                    item.setText(6, self.format_file_size(os.path.getsize(f)))
+                except OSError:
+                    item.setText(6, "Unknown")
+                item.setText(7, os.path.dirname(f))
+
+        preview_tree.expandAll()
+        for i in range(preview_tree.columnCount()):
+            preview_tree.resizeColumnToContents(i)
+        layout.addWidget(preview_tree)
+
+        buttons_layout = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        buttons_layout.addWidget(cancel_btn)
+
+        buttons_layout.addStretch()
+
+        proceed_btn = QPushButton(f"🚀 Move {len(files_to_move)} Files")
+        proceed_btn.setStyleSheet("background-color: #2e7d32; color: white; padding: 8px 16px;")
+        proceed_btn.clicked.connect(lambda: self._start_bulk_move_duplicates(files_to_move, dialog))
+        buttons_layout.addWidget(proceed_btn)
+        layout.addLayout(buttons_layout)
+
+        dialog.exec()
+
+    def _start_bulk_move_duplicates(self, files_to_move, preview_dialog):
+        """Start bulk move operation with progress dialog."""
+        preview_dialog.accept()
+
+        progress_dialog = QDialog(self)
+        progress_dialog.setWindowTitle("🚀 Bulk Move Duplicates")
+        progress_dialog.resize(500, 180)
+        progress_layout = QVBoxLayout(progress_dialog)
+
+        status_label = QLabel("Preparing move operation...")
+        progress_layout.addWidget(status_label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, len(files_to_move))
+        progress_layout.addWidget(progress_bar)
+
+        buttons_layout = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        buttons_layout.addStretch()
+        buttons_layout.addWidget(cancel_btn)
+        progress_layout.addLayout(buttons_layout)
+
+        thread = BulkMoveThread(files_to_move, self.move_destination)
+        self._active_move_thread = thread
+
+        def on_progress(done, total):
+            progress_bar.setValue(done)
+            progress_bar.setMaximum(total)
+
+        def on_status(text):
+            status_label.setText(text)
+
+        def on_cancel():
+            status_label.setText("Cancelling...")
+            cancel_btn.setEnabled(False)
+            thread.cancel()
+
+        def on_finished(result):
+            progress_dialog.accept()
+            self._handle_bulk_move_results(result, operation_name="Bulk Move Duplicates")
+
+        thread.progress.connect(on_progress)
+        thread.status.connect(on_status)
+        thread.result.connect(on_finished)
+        cancel_btn.clicked.connect(on_cancel)
+
+        thread.start()
+        progress_dialog.exec()
+
+    def show_audio_move_preview(self):
+        """Show preview dialog for audio smart move (keep best quality)."""
+        if not self.duplicates:
+            QMessageBox.warning(self, "No Duplicates", "No duplicate files found to process.")
+            return
+        if not self.move_destination:
+            QMessageBox.warning(self, "Warning", "Please select a move destination first")
+            return
+        if not self._has_audio_duplicates():
+            QMessageBox.information(self, "No Audio Duplicates", "No audio duplicate groups found.")
+            return
+
+        audio_groups = []
+        warnings = []
+        total_analyzed = 0
+        total_to_move = 0
+        total_kept = 0
+        total_skipped = 0
+        improvement_scores = []
+        kept_log = []
+
+        for hash_val, files in self.duplicates.items():
+            audio_files = [f for f in files if self._is_audio_file(f)]
+            if len(audio_files) < 2:
+                continue
+
+            meta_map = {}
+            valid_files = []
+            skipped_files = []
+
+            for f in audio_files:
+                meta = self.audio_quality_analyzer.analyze_audio_quality(f)
+                if meta is None:
+                    warnings.append(f"{f}: Unable to analyze audio metadata")
+                    skipped_files.append(f)
+                    continue
+                total_analyzed += 1
+                if meta.get('analysis_error'):
+                    warnings.append(f"{f}: Corrupted or unreadable audio metadata")
+                    skipped_files.append(f)
+                else:
+                    valid_files.append(f)
+                meta_map[f] = meta
+
+            if len(valid_files) < 2:
+                total_skipped += len(skipped_files)
+                continue
+
+            max_score = max(meta_map[f]['quality_score'] for f in valid_files)
+            best_file = None
+            for f in audio_files:
+                if f in valid_files and meta_map[f]['quality_score'] == max_score:
+                    best_file = f
+                    break
+            if best_file is None:
+                best_file = valid_files[0]
+
+            other_scores = [meta_map[f]['quality_score'] for f in valid_files if f != best_file]
+            if other_scores:
+                improvement_scores.append(max_score - (sum(other_scores) / len(other_scores)))
+            else:
+                improvement_scores.append(0.0)
+
+            move_files = [f for f in valid_files if f != best_file]
+            total_to_move += len(move_files)
+            total_kept += 1
+            total_skipped += len(skipped_files)
+
+            best_meta = meta_map.get(best_file, {})
+            kept_log.append(
+                f"KEEP: {best_file} | {best_meta.get('format', 'unknown').upper()} "
+                f"| {best_meta.get('bitrate_kbps', 0):.0f} kbps | "
+                f"{best_meta.get('sample_rate_hz', 0) / 1000:.1f} kHz | "
+                f"Score {best_meta.get('quality_score', 0):.1f}"
+            )
+
+            audio_groups.append({
+                "files": audio_files,
+                "valid_files": valid_files,
+                "skipped_files": skipped_files,
+                "meta": meta_map,
+                "best_file": best_file,
+                "move_files": move_files,
+                "max_score": max_score
+            })
+
+        if not audio_groups:
+            QMessageBox.information(self, "No Audio Groups", "No eligible audio duplicate groups found.")
+            return
+
+        avg_improvement = sum(improvement_scores) / len(improvement_scores) if improvement_scores else 0.0
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("🎵 Audio Smart Move - Preview")
+        dialog.resize(980, 680)
+
+        layout = QVBoxLayout(dialog)
+
+        summary_group = QGroupBox("📊 Summary")
+        summary_layout = QVBoxLayout(summary_group)
+        summary_layout.addWidget(QLabel(f"<b>Audio groups:</b> {len(audio_groups)}"))
+        summary_layout.addWidget(QLabel(f"<b>Audio files analyzed:</b> {total_analyzed}"))
+        summary_layout.addWidget(QLabel(f"<b>Files to KEEP:</b> {total_kept}"))
+        summary_layout.addWidget(QLabel(f"<b>Files to MOVE:</b> {total_to_move}"))
+        summary_layout.addWidget(QLabel(f"<b>Skipped (corrupted/unreadable):</b> {total_skipped}"))
+        summary_layout.addWidget(QLabel(f"<b>Avg quality improvement:</b> {avg_improvement:.1f}"))
+        summary_layout.addWidget(QLabel(f"<b>Destination:</b> {self.move_destination}"))
+        layout.addWidget(summary_group)
+
+        preview_tree = QTreeWidget()
+        preview_tree.setHeaderLabels(["File", "Format", "Bitrate", "Sample Rate", "Size", "Quality", "Action"])
+        preview_tree.setAlternatingRowColors(True)
+
+        for group in audio_groups:
+            group_item = QTreeWidgetItem()
+            group_item.setText(0, f"🎵 Audio Group ({len(group['files'])} files)")
+            preview_tree.addTopLevelItem(group_item)
+
+            max_score = group["max_score"]
+            for f in group["files"]:
+                item = QTreeWidgetItem(group_item)
+                item.setText(0, os.path.basename(f))
+                meta = group["meta"].get(f, {})
+
+                fmt = (meta.get('format') or 'unknown').upper()
+                item.setText(1, fmt)
+                item.setText(2, f"{meta.get('bitrate_kbps', 0):.0f} kbps")
+                item.setText(3, self.format_sample_rate(meta.get('sample_rate_hz', 0)))
+                item.setText(4, self.format_file_size(meta.get('file_size_bytes', 0)))
+
+                if f in group["skipped_files"]:
+                    item.setText(5, "N/A")
+                    item.setText(6, "⚠️ SKIP")
+                    item.setForeground(6, QColor(200, 120, 0))
+                    item.setToolTip(0, "Corrupted or unreadable audio metadata")
+                    continue
+
+                score = meta.get('quality_score', 0.0)
+                quality_pct = (score / max_score) * 100 if max_score > 0 else 0.0
+                item.setText(5, f"{quality_pct:.0f}%")
+                item.setToolTip(5, f"Quality score: {score:.1f}")
+
+                if f == group["best_file"]:
+                    item.setText(6, "⭐ KEEP")
+                    item.setForeground(6, QColor(0, 150, 0))
+                    font = item.font(0)
+                    font.setBold(True)
+                    item.setFont(0, font)
+                else:
+                    item.setText(6, "📦 MOVE")
+                    item.setForeground(6, QColor(200, 0, 0))
+
+        preview_tree.expandAll()
+        for i in range(preview_tree.columnCount()):
+            preview_tree.resizeColumnToContents(i)
+        layout.addWidget(preview_tree)
+
+        buttons_layout = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        buttons_layout.addWidget(cancel_btn)
+        buttons_layout.addStretch()
+
+        proceed_btn = QPushButton(f"🎵 Move {total_to_move} Audio Files")
+        proceed_btn.setStyleSheet("background-color: #6a1b9a; color: white; padding: 8px 16px;")
+        proceed_btn.clicked.connect(lambda: self._start_audio_smart_move(audio_groups, avg_improvement, kept_log, warnings, dialog))
+        buttons_layout.addWidget(proceed_btn)
+        layout.addLayout(buttons_layout)
+
+        dialog.exec()
+
+    def _start_audio_smart_move(self, audio_groups, avg_improvement, kept_log, warnings, preview_dialog):
+        """Start audio smart move operation."""
+        preview_dialog.accept()
+
+        files_to_move = []
+        total_analyzed = 0
+        total_kept = 0
+
+        for group in audio_groups:
+            files_to_move.extend(group["move_files"])
+            total_analyzed += len(group["valid_files"]) + len(group["skipped_files"])
+            total_kept += 1
+
+        progress_dialog = QDialog(self)
+        progress_dialog.setWindowTitle("🎵 Audio Smart Move")
+        progress_dialog.resize(500, 180)
+        progress_layout = QVBoxLayout(progress_dialog)
+
+        status_label = QLabel("Preparing audio move operation...")
+        progress_layout.addWidget(status_label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, len(files_to_move))
+        progress_layout.addWidget(progress_bar)
+
+        buttons_layout = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        buttons_layout.addStretch()
+        buttons_layout.addWidget(cancel_btn)
+        progress_layout.addLayout(buttons_layout)
+
+        thread = BulkMoveThread(files_to_move, self.move_destination)
+        self._active_move_thread = thread
+
+        def on_progress(done, total):
+            progress_bar.setValue(done)
+            progress_bar.setMaximum(total)
+
+        def on_status(text):
+            status_label.setText(text)
+
+        def on_cancel():
+            status_label.setText("Cancelling...")
+            cancel_btn.setEnabled(False)
+            thread.cancel()
+
+        def on_finished(result):
+            progress_dialog.accept()
+            self._handle_audio_move_results(
+                result,
+                total_analyzed=total_analyzed,
+                total_kept=total_kept,
+                avg_improvement=avg_improvement,
+                kept_log=kept_log,
+                warnings=warnings
+            )
+
+        thread.progress.connect(on_progress)
+        thread.status.connect(on_status)
+        thread.result.connect(on_finished)
+        cancel_btn.clicked.connect(on_cancel)
+
+        thread.start()
+        progress_dialog.exec()
+
+    def _handle_bulk_move_results(self, result, operation_name="Bulk Move"):
+        """Handle results of bulk move operations."""
+        moved_count = result.get("moved_count", 0)
+        failed_files = result.get("failed_files", [])
+        moved_pairs = result.get("moved_pairs", [])
+        space_freed = result.get("space_freed", 0)
+        cancelled = result.get("cancelled", False)
+
+        undo_enabled = self.enterprise_config.get("enable_undo", True)
+        if undo_enabled and moved_pairs:
+            for original_path, new_path in moved_pairs:
+                self.undo_manager.record_move(original_path, new_path)
+            self._update_undo_state()
+
+        if cancelled:
+            QMessageBox.information(self, operation_name, "⚠️ Operation cancelled by user.")
+
+        if moved_count > 0:
+            QMessageBox.information(
+                self,
+                operation_name,
+                f"✅ Successfully moved {moved_count} files.\n"
+                f"📦 Space freed: {self.format_file_size(space_freed)}"
+            )
+
+        if failed_files:
+            self._show_error_dialog("Some Moves Failed", failed_files)
+
+        self.refresh_current_view()
+
+    def _handle_audio_move_results(self, result, total_analyzed, total_kept, avg_improvement, kept_log, warnings):
+        """Handle results of audio smart move operation."""
+        moved_count = result.get("moved_count", 0)
+        failed_files = result.get("failed_files", [])
+        moved_pairs = result.get("moved_pairs", [])
+        cancelled = result.get("cancelled", False)
+
+        undo_enabled = self.enterprise_config.get("enable_undo", True)
+        if undo_enabled and moved_pairs:
+            for original_path, new_path in moved_pairs:
+                self.undo_manager.record_move(original_path, new_path)
+            self._update_undo_state()
+
+        if cancelled:
+            QMessageBox.information(self, "Audio Smart Move", "⚠️ Operation cancelled by user.")
+
+        QMessageBox.information(
+            self,
+            "Audio Smart Move Complete",
+            f"✅ Audio files analyzed: {total_analyzed}\n"
+            f"📦 Files moved: {moved_count}\n"
+            f"⭐ Files kept: {total_kept}\n"
+            f"📈 Avg quality improvement: {avg_improvement:.1f}"
+        )
+
+        if warnings:
+            self._show_error_dialog("Audio Analysis Warnings", warnings)
+        if failed_files:
+            self._show_error_dialog("Some Moves Failed", failed_files)
+
+        if kept_log:
+            self._show_log_dialog("Audio Smart Move - Kept Files", kept_log)
+
+        self.refresh_current_view()
+
+    def _show_error_dialog(self, title, errors):
+        """Show a scrollable error dialog with details."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(700, 400)
+        layout = QVBoxLayout(dialog)
+
+        text_area = QTextEdit()
+        text_area.setReadOnly(True)
+        text_area.setText("\n".join(errors))
+        layout.addWidget(text_area)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+
+        dialog.exec()
+
+    def _show_log_dialog(self, title, lines):
+        """Show a scrollable dialog with log details."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.resize(700, 400)
+        layout = QVBoxLayout(dialog)
+
+        text_area = QTextEdit()
+        text_area.setReadOnly(True)
+        text_area.setText("\n".join(lines))
+        layout.addWidget(text_area)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn)
+
+        dialog.exec()
+
     def move_selected_files(self):
         """Move selected files to destination folder"""
         if not self.move_destination:
@@ -3787,6 +5284,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         """Refresh the current view after file operations"""
         # Clear selections
         self.clear_selection()
+        self._prune_result_sets()
         
         # Re-populate trees (files may have been moved/deleted)
         self.populate_duplicate_groups()
@@ -3795,6 +5293,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         # Clear file trees
         self.duplicate_files_tree.clear()
         self.similar_files_tree.clear()
+        self._update_bulk_operation_buttons()
     
     def format_file_size(self, size_bytes):
         """Format file size in human readable format"""
@@ -3803,6 +5302,16 @@ class EnhancedDuplicateFinder(QMainWindow):
                 return f"{size_bytes:.1f} {unit}"
             size_bytes /= 1024
         return f"{size_bytes:.1f} PB"
+
+    def format_sample_rate(self, sample_rate_hz):
+        """Format sample rate in user-friendly format."""
+        try:
+            rate = float(sample_rate_hz)
+            if rate <= 0:
+                return "Unknown"
+            return f"{rate / 1000:.1f} kHz"
+        except Exception:
+            return "Unknown"
     
     def format_timestamp(self, timestamp):
         """Format timestamp in readable format"""
@@ -4150,9 +5659,9 @@ class EnhancedDuplicateFinder(QMainWindow):
         files_to_analyze = []
         
         if current_tab == 1:  # Results tab
-            # Check duplicate files tree
-            for i in range(self.duplicate_files_tree.topLevelItemCount()):
-                item = self.duplicate_files_tree.topLevelItem(i)
+            active_tree = self.duplicate_files_tree if self.results_tabs.currentIndex() == 0 else self.similar_files_tree
+            for i in range(active_tree.topLevelItemCount()):
+                item = active_tree.topLevelItem(i)
                 if item.checkState(0) == Qt.CheckState.Checked:
                     file_path = item.data(0, Qt.ItemDataRole.UserRole)
                     if file_path:
@@ -4211,9 +5720,12 @@ Confidence: {analysis.get('confidence', 0):.1%}
                 # Restore directory if available
                 if 'directory' in session_data:
                     self.directory = session_data['directory']
-                    self.directory_label.setText(f"📁 {self.directory}")
+                    self.dir_label.setText(f"📁 {self.directory}")
+                    self.scan_btn.setEnabled(True)
+                    self.scan_action.setEnabled(True)
                 
                 # Update UI
+                self._prune_result_sets()
                 self.populate_duplicate_groups()
                 self.populate_similar_groups()
                 
@@ -4270,8 +5782,8 @@ Confidence: {analysis.get('confidence', 0):.1%}
             except Exception as e:
                 QMessageBox.critical(self, "Export Error", f"❌ Failed to export session:\n{e}")
     
-    def undo_last_delete(self):
-        """Undo the last file deletion"""
+    def undo_last_operation(self):
+        """Undo the last file operation"""
         if not self.enterprise_config.get("enable_undo", True):
             QMessageBox.information(self, "Undo Disabled",
                                   "Undo is disabled. Enable it in Enterprise Configuration.")
@@ -4294,9 +5806,9 @@ Confidence: {analysis.get('confidence', 0):.1%}
         undo_count = self.undo_manager.get_undo_count()
         self.undo_action.setEnabled(undo_count > 0)
         if undo_count > 0:
-            self.undo_action.setText(f"↩️ &Undo Delete ({undo_count})")
+            self.undo_action.setText(f"↩️ &Undo Last Operation ({undo_count})")
         else:
-            self.undo_action.setText("↩️ &Undo Delete")
+            self.undo_action.setText("↩️ &Undo Last Operation")
     
     def clear_undo_backups(self):
         """Clear all undo backups"""
@@ -4319,6 +5831,7 @@ Confidence: {analysis.get('confidence', 0):.1%}
     
     def refresh_results(self):
         """Refresh the results display"""
+        self._prune_result_sets()
         self.populate_duplicate_groups()
         self.populate_similar_groups()
         self.status_bar.showMessage("🔄 Results refreshed", 2000)
@@ -4329,7 +5842,7 @@ Confidence: {analysis.get('confidence', 0):.1%}
         
         if current_tab == 1:  # Results tab
             # Get current sub-tab
-            results_tab_index = self.results_tab_widget.currentIndex()
+            results_tab_index = self.results_tabs.currentIndex()
             
             if results_tab_index == 0:  # Duplicates tab
                 for i in range(self.duplicate_files_tree.topLevelItemCount()):
@@ -4358,18 +5871,38 @@ Confidence: {analysis.get('confidence', 0):.1%}
     <li>Multiple hash algorithms (MD5, SHA256, Perceptual, Audio, Semantic)</li>
     <li>Parallel processing with {OPTIMAL_WORKERS} workers</li>
     <li>Smart sorting and keep suggestions</li>
-    <li>Undo file deletions</li>
+    <li>Undo last file operation</li>
     <li>Session import/export</li>
     <li>Dark/Light theme support</li>
 </ul>
 """
         QMessageBox.about(self, "About", about_text)
+
+    def _prune_result_sets(self):
+        """Remove result entries for files that no longer exist."""
+        pruned_duplicates = {}
+        for hash_val, files in self.duplicates.items():
+            existing_files = [file_path for file_path in files if os.path.exists(file_path)]
+            if len(existing_files) > 1:
+                pruned_duplicates[hash_val] = existing_files
+        self.duplicates = pruned_duplicates
+
+        pruned_similar = {}
+        for key, group_data in self.similar_files.items():
+            existing_files = [file_path for file_path in group_data.get("files", []) if os.path.exists(file_path)]
+            if len(existing_files) > 1:
+                updated_group = dict(group_data)
+                updated_group["files"] = existing_files
+                pruned_similar[key] = updated_group
+        self.similar_files = pruned_similar
     
     def closeEvent(self, event):
         """Handle application close - save state and cleanup"""
         # Save window state
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("windowState", self.saveState())
+        if self.directory:
+            self.settings.setValue("last_directory", self.directory)
         
         # Save enterprise config
         import json

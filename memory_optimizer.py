@@ -138,6 +138,7 @@ class MemoryManager:
         self.usage_lock = threading.RLock()  # RLock to allow re-entry from allocate_memory -> _cleanup_old_cache
         self.cached_data: Dict[str, Any] = {}
         self.access_times: Dict[str, float] = {}
+        self.cache_sizes: Dict[str, int] = {}
         
     def allocate_memory(self, size_bytes: int, identifier: Optional[str] = None) -> bool:
         """Try to allocate memory, return False if would exceed limit"""
@@ -162,6 +163,8 @@ class MemoryManager:
                 del self.cached_data[identifier]
                 if identifier in self.access_times:
                     del self.access_times[identifier]
+                if identifier in self.cache_sizes:
+                    del self.cache_sizes[identifier]
                 
     def cache_data(self, key: str, data: Any, size_bytes: int) -> bool:
         """Cache data if memory allows (thread-safe)"""
@@ -174,6 +177,7 @@ class MemoryManager:
             self.current_usage += size_bytes
             self.cached_data[key] = data
             self.access_times[key] = time.time()
+            self.cache_sizes[key] = size_bytes
             return True
         
     def get_cached_data(self, key: str) -> Optional[Any]:
@@ -198,9 +202,12 @@ class MemoryManager:
         
         for key in keys_to_remove:
             if key in self.cached_data:
+                self.current_usage = max(0, self.current_usage - self.cache_sizes.get(key, 0))
                 del self.cached_data[key]
             if key in self.access_times:
                 del self.access_times[key]
+            if key in self.cache_sizes:
+                del self.cache_sizes[key]
             
     def get_memory_stats(self) -> Dict[str, Any]:
         """Get current memory usage statistics"""

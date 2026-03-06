@@ -10,6 +10,7 @@ pydub
 ffmpeg-python
 xxhash
 ray
+mutagen
 # Audio fingerprinting
 pyacoustid
 librosa
