@@ -379,6 +379,14 @@ QMenu::item {
 QMenu::item:selected {
     background-color: #295e96;
 }
+#settingsHelpText {
+    background-color: #202733;
+    color: #d9e4f0;
+    padding: 12px;
+    border: 1px solid #323846;
+    border-radius: 8px;
+    line-height: 1.35em;
+}
 """
 
 LIGHT_THEME = """
@@ -573,6 +581,14 @@ QMenu::item {
 }
 QMenu::item:selected {
     background-color: #d8ebfa;
+}
+#settingsHelpText {
+    background-color: #eef4fa;
+    color: #304155;
+    padding: 12px;
+    border: 1px solid #d0d8e3;
+    border-radius: 8px;
+    line-height: 1.35em;
 }
 """
 
@@ -2714,7 +2730,19 @@ class EnhancedDuplicateFinder(QMainWindow):
     def create_scanner_tab(self):
         """Create the scanner configuration tab"""
         scanner_widget = QWidget()
-        layout = QVBoxLayout(scanner_widget)
+        outer_layout = QVBoxLayout(scanner_widget)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        outer_layout.addWidget(scroll_area)
+
+        content_widget = QWidget()
+        scroll_area.setWidget(content_widget)
+
+        layout = QVBoxLayout(content_widget)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(14)
 
@@ -3417,11 +3445,30 @@ class EnhancedDuplicateFinder(QMainWindow):
     def create_settings_tab(self):
         """Create settings configuration tab"""
         settings_widget = QWidget()
-        layout = QVBoxLayout(settings_widget)
+        outer_layout = QVBoxLayout(settings_widget)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        outer_layout.addWidget(scroll_area)
+
+        content_widget = QWidget()
+        scroll_area.setWidget(content_widget)
+
+        layout = QVBoxLayout(content_widget)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(14)
         
         # GPU & Performance Settings
         perf_group = QGroupBox("🚀 Performance Settings (GPU & Parallel Processing)")
         perf_layout = QGridLayout(perf_group)
+        perf_layout.setContentsMargins(14, 12, 14, 14)
+        perf_layout.setHorizontalSpacing(14)
+        perf_layout.setVerticalSpacing(10)
+        perf_layout.setColumnStretch(1, 1)
+        perf_layout.setColumnStretch(3, 1)
         
         # GPU acceleration
         self.use_gpu_cb = QCheckBox("Enable CUDA GPU Acceleration")
@@ -3472,6 +3519,11 @@ class EnhancedDuplicateFinder(QMainWindow):
         # Perceptual Hash Settings (for image/video duplicates)
         phash_group = QGroupBox("🖼️ Perceptual Hash Settings (Image/Video)")
         phash_layout = QGridLayout(phash_group)
+        phash_layout.setContentsMargins(14, 12, 14, 14)
+        phash_layout.setHorizontalSpacing(14)
+        phash_layout.setVerticalSpacing(10)
+        phash_layout.setColumnStretch(1, 1)
+        phash_layout.setColumnStretch(3, 1)
         
         # Import threshold system
         try:
@@ -3487,6 +3539,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.phash_preset_combo.addItem("⚖️ Balanced", "balanced")
         self.phash_preset_combo.addItem("🔍 Aggressive", "aggressive")
         self.phash_preset_combo.setCurrentIndex(1)  # Default to balanced
+        self.phash_preset_combo.setMinimumWidth(220)
         self.phash_preset_combo.currentIndexChanged.connect(self.on_phash_preset_changed)
         self.phash_preset_combo.setToolTip(
             "Strict: Only very similar files (minimal differences)\n"
@@ -3498,6 +3551,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         # Preset description
         self.phash_preset_desc = QLabel("Good balance between precision and recall")
         self.phash_preset_desc.setStyleSheet("color: #666; font-style: italic;")
+        self.phash_preset_desc.setWordWrap(True)
         phash_layout.addWidget(self.phash_preset_desc, 0, 2, 1, 2)
         
         # Current thresholds display
@@ -3521,6 +3575,10 @@ class EnhancedDuplicateFinder(QMainWindow):
         # Similarity detection settings
         similarity_group = QGroupBox("🎯 Similarity Detection Settings")
         similarity_layout = QGridLayout(similarity_group)
+        similarity_layout.setContentsMargins(14, 12, 14, 14)
+        similarity_layout.setHorizontalSpacing(14)
+        similarity_layout.setVerticalSpacing(10)
+        similarity_layout.setColumnStretch(1, 1)
         
         # Name similarity
         self.compare_by_name_cb = QCheckBox("Compare by filename similarity")
@@ -3535,6 +3593,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         similarity_layout.addWidget(self.name_similarity_slider, 1, 1)
         
         self.name_similarity_label = QLabel("80%")
+        self.name_similarity_label.setMinimumWidth(48)
         similarity_layout.addWidget(self.name_similarity_label, 1, 2)
         
         # Size similarity
@@ -3546,6 +3605,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.size_tolerance_spin = QSpinBox()
         self.size_tolerance_spin.setRange(0, 100)
         self.size_tolerance_spin.setValue(1)
+        self.size_tolerance_spin.setMaximumWidth(160)
         similarity_layout.addWidget(self.size_tolerance_spin, 3, 1)
         
         # Content similarity
@@ -3561,6 +3621,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         similarity_layout.addWidget(self.content_similarity_slider, 5, 1)
         
         self.content_similarity_label = QLabel("90%")
+        self.content_similarity_label.setMinimumWidth(48)
         similarity_layout.addWidget(self.content_similarity_label, 5, 2)
         
         layout.addWidget(similarity_group)
@@ -3588,7 +3649,7 @@ class EnhancedDuplicateFinder(QMainWindow):
             "• Content similarity: Compares text file content"
         )
         help_text.setWordWrap(True)
-        help_text.setStyleSheet("QLabel { background-color: #f0f0f0; padding: 10px; border-radius: 5px; }")
+        help_text.setObjectName("settingsHelpText")
         layout.addWidget(help_text)
         
         layout.addStretch()
