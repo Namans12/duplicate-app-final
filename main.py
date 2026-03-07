@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced Duplicate File Finder with Advanced Comparison & Move Functionality
+Duplicate File Finder with Advanced Comparison and File Management
 Features: Recycle Bin, Scan Filters, Progress with ETA, Export Results
 Technical: CUDA GPU Acceleration, Parallel Processing, Memory Optimization
 """
@@ -144,11 +144,11 @@ try:
     from memory_optimizer import MemoryManager, StreamingHasher
     from duplicate_merger import FileMerger
     HAS_ENTERPRISE_MODULES = True
-    logger.info("🏢 Enterprise modules loaded successfully")
+    logger.info("Advanced modules loaded successfully")
 except ImportError as e:
-    logger.info(f"ℹ️ Enterprise modules not available: {e}")
+    logger.info(f"Advanced modules not available: {e}")
 except Exception as e:
-    logger.warning(f"⚠️ Enterprise modules error: {e}")
+    logger.warning(f"Advanced modules error: {e}")
 
 # Dataclass for structured progress reporting
 from dataclasses import dataclass
@@ -1742,17 +1742,56 @@ class EnhancedScanThread(QThread):
                 similarity_reasons = []
                 name_similar = False
                 size_similar = False
+                media_type1 = get_media_type(file1)
+                media_type2 = get_media_type(file2)
+                shared_media_type = media_type1 if media_type1 == media_type2 else None
+                profile = get_profile_for_path(file1, self.media_profiles) if shared_media_type else None
                 
                 # Check for similar videos using video fingerprinting
                 video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpeg', '.mpg'}
                 audio_extensions = {'.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.m4a', '.opus', '.aiff', '.ape', '.alac', '.wv'}
                 ext1 = os.path.splitext(file1)[1].lower()
                 ext2 = os.path.splitext(file2)[1].lower()
-                
-                # Get hash type for conditional processing
-                hash_type = settings.get('hash_type', 'MD5')
-                
-                if ext1 in video_extensions and ext2 in video_extensions and HAS_VIDEO_FINGERPRINTER and hash_type == 'Perceptual':
+
+                if shared_media_type and profile and profile.get("enable_fuzzy", False):
+                    if shared_media_type == "images":
+                        try:
+                            image_match, image_score, image_reasons = compare_image_files(file1, file2, profile)
+                            if image_match:
+                                is_similar = True
+                                similarity_reasons.extend(image_reasons or [f"Similar image content ({image_score:.0%})"])
+                        except Exception:
+                            pass
+                    elif shared_media_type in {"documents", "code"}:
+                        try:
+                            doc_match, doc_score, doc_reasons = compare_document_files(
+                                file1,
+                                file2,
+                                profile,
+                                semantic_engine=semantic_engine if HAS_SEMANTIC_SIMILARITY else None,
+                            )
+                            if doc_match:
+                                is_similar = True
+                                similarity_reasons.extend(doc_reasons or [f"Similar document content ({doc_score:.0%})"])
+                        except Exception:
+                            pass
+                    elif shared_media_type == "archives":
+                        try:
+                            archive_match, archive_score, archive_reasons = compare_archive_files(file1, file2, profile)
+                            if archive_match:
+                                is_similar = True
+                                similarity_reasons.extend(archive_reasons or [f"Similar archive contents ({archive_score:.0%})"])
+                        except Exception:
+                            pass
+
+                if (
+                    ext1 in video_extensions
+                    and ext2 in video_extensions
+                    and HAS_VIDEO_FINGERPRINTER
+                    and shared_media_type == "videos"
+                    and profile
+                    and profile.get("enable_fuzzy", False)
+                ):
                     try:
                         fp1 = video_fingerprinter.compute_video_fingerprint(file1, num_keyframes=5)
                         fp2 = video_fingerprinter.compute_video_fingerprint(file2, num_keyframes=5)
@@ -1764,11 +1803,18 @@ class EnhancedScanThread(QThread):
                             if is_sim:
                                 is_similar = True
                                 similarity_reasons.append(f"Similar video content ({similarity:.0%})")
-                    except Exception as e:
+                    except Exception:
                         pass  # Fall through to other comparison methods
                 
-                # Check for similar audio using audio fingerprinting - only in Audio mode
-                elif ext1 in audio_extensions and ext2 in audio_extensions and HAS_AUDIO_FINGERPRINTER and hash_type == 'Audio':
+                # Check for similar audio using audio fingerprinting
+                elif (
+                    ext1 in audio_extensions
+                    and ext2 in audio_extensions
+                    and HAS_AUDIO_FINGERPRINTER
+                    and shared_media_type == "audio"
+                    and profile
+                    and profile.get("enable_fuzzy", False)
+                ):
                     try:
                         fp1 = audio_fingerprinter.compute_fingerprint(file1, method="hybrid")
                         fp2 = audio_fingerprinter.compute_fingerprint(file2, method="hybrid")
@@ -1781,7 +1827,7 @@ class EnhancedScanThread(QThread):
                                 is_similar = True
                                 method = details.get('method_used', 'hybrid')
                                 similarity_reasons.append(f"Similar audio ({similarity:.0%} via {method})")
-                    except Exception as e:
+                    except Exception:
                         pass  # Fall through to other comparison methods
                 
                 # Check various similarity criteria
@@ -1820,7 +1866,10 @@ class EnhancedScanThread(QThread):
                     match_type = "name_size"
                     if "Same name, different size" in similarity_reasons:
                         match_type = "same_name_diff_size"
-                    if any(reason.startswith("Similar audio") or reason.startswith("Similar video") or reason.startswith("Similar content") for reason in similarity_reasons):
+                    if any(
+                        reason.startswith(("Similar audio", "Similar video", "Similar content", "lexical ", "archive ", "phash "))
+                        for reason in similarity_reasons
+                    ):
                         match_type = "content"
                     key = f"similar_{len(similar_files)}"
                     similar_files[key] = {
@@ -1833,7 +1882,7 @@ class EnhancedScanThread(QThread):
 
 
 class EnterpriseConfigDialog(QDialog):
-    """Configuration dialog for enterprise features"""
+    """Configuration dialog for advanced features"""
     
     def __init__(self, parent=None, current_config=None):
         super().__init__(parent)
@@ -1848,16 +1897,16 @@ class EnterpriseConfigDialog(QDialog):
         layout = QVBoxLayout(self)
         
         # Header
-        header = QLabel("⚙️ Configure Enterprise Features")
+        header = QLabel("Configure Advanced Features")
         header.setStyleSheet("font-size: 16px; font-weight: bold; padding: 10px;")
         layout.addWidget(header)
         
         # Status label
         if HAS_ENTERPRISE_MODULES:
-            status = QLabel("✅ Enterprise modules available")
+            status = QLabel("Advanced modules available")
             status.setStyleSheet("color: #4CAF50; padding: 5px;")
         else:
-            status = QLabel("⚠️ Enterprise modules not installed - some features unavailable")
+            status = QLabel("Advanced modules not installed - some features are unavailable")
             status.setStyleSheet("color: #ff9800; padding: 5px;")
         layout.addWidget(status)
         
@@ -2216,7 +2265,7 @@ class EnhancedDuplicateFinder(QMainWindow):
             except Exception:
                 self.media_profiles = get_default_media_profiles()
         
-        # Enterprise configuration
+        # Advanced configuration
         self.enterprise_config = {
             "use_database": True,
             "incremental_scan": True,
@@ -2235,8 +2284,11 @@ class EnhancedDuplicateFinder(QMainWindow):
             "max_undo_operations": 100
         }
         
-        # Load saved enterprise config
-        saved_config = self.settings.value("enterprise_config", None)
+        # Load saved advanced config, keeping backward compatibility with
+        # older enterprise_config saves.
+        saved_config = self.settings.value("advanced_config", None)
+        if saved_config is None:
+            saved_config = self.settings.value("enterprise_config", None)
         if saved_config:
             try:
                 import json
@@ -2248,7 +2300,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.undo_manager = UndoManager()
         self.undo_manager.max_operations = self.enterprise_config.get("max_undo_operations", 100)
         
-        # Initialize enterprise components (if available)
+        # Initialize advanced components (if available)
         self.db_manager = None
         self.plugin_manager = None
         self.memory_manager = None
@@ -2288,7 +2340,7 @@ class EnhancedDuplicateFinder(QMainWindow):
                 logger.info("✅ File merger initialized")
                 
         except Exception as e:
-            logger.warning(f"⚠️ Enterprise component initialization error: {e}")
+            logger.warning(f"Advanced component initialization error: {e}")
         
     def init_ui(self):
         self.setWindowTitle("Duplicate File Finder")
@@ -5751,7 +5803,7 @@ class EnhancedDuplicateFinder(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Export Error", f"❌ Failed to export:\n{e}")
 
-    # ==================== Enterprise & Undo Methods ====================
+    # ==================== Advanced Config & Undo Methods ====================
     
     def show_enterprise_config(self):
         """Show enterprise configuration dialog"""
@@ -5761,15 +5813,16 @@ class EnhancedDuplicateFinder(QMainWindow):
             
             # Save to settings
             import json
+            self.settings.setValue("advanced_config", json.dumps(self.enterprise_config))
             self.settings.setValue("enterprise_config", json.dumps(self.enterprise_config))
             
             # Update undo manager
             self.undo_manager.max_operations = self.enterprise_config.get("max_undo_operations", 100)
             
-            # Reinitialize enterprise components
+            # Reinitialize advanced components
             self._init_enterprise_components()
             
-            self.status_bar.showMessage("✅ Enterprise configuration updated", 3000)
+            self.status_bar.showMessage("Advanced configuration updated", 3000)
     
     def show_merge_analysis(self):
         """Show merge analysis dialog for selected files"""
@@ -6031,6 +6084,7 @@ Confidence: {analysis.get('confidence', 0):.1%}
         
         # Save enterprise config
         import json
+        self.settings.setValue("advanced_config", json.dumps(self.enterprise_config))
         self.settings.setValue("enterprise_config", json.dumps(self.enterprise_config))
         self.settings.setValue("media_profiles", json.dumps(self.get_media_profiles_from_ui()))
         

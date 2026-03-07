@@ -19,6 +19,14 @@ if (-not (Test-Path $venv)) {
 
 $venvPy = Join-Path $venv "Scripts\python.exe"
 
+if (-not (Test-Path $venvPy)) {
+    Write-Host "Existing .venv-app is incomplete; recreating it..."
+    if (Test-Path $venv) {
+        Remove-Item -Recurse -Force $venv
+    }
+    & $PythonExe -m venv $venv
+}
+
 Write-Host "Upgrading pip in .venv-app"
 & $venvPy -m pip install --upgrade pip
 
