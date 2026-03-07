@@ -1,0 +1,102 @@
+# Enterprise Duplicate File Finder Requirements
+# Complete set of dependencies for all enterprise features
+
+# Core GUI Framework
+PyQt6>=6.5.0
+
+# Database and Persistence
+sqlite3  # Built into Python, but listed for documentation
+
+# GPU Acceleration (Optional)
+cupy-cuda11x>=11.0.0; platform_system != "Darwin"  # CUDA 11.x support for non-macOS
+cupy-cuda12x>=12.0.0; platform_system != "Darwin"  # CUDA 12.x support for non-macOS
+
+# Image Processing
+Pillow>=9.0.0
+opencv-python>=4.7.0
+imagehash>=4.3.0
+
+# Performance and Memory Optimization
+numpy>=1.21.0
+concurrent-futures>=3.1.1; python_version < "3.2"  # Built-in for Python 3.2+
+
+# File System and Path Handling
+pathlib>=1.0.1; python_version < "3.4"  # Built-in for Python 3.4+
+
+# Data Handling
+json5>=0.9.0  # Enhanced JSON support
+jsonschema>=4.0.0  # JSON validation
+
+# Text Processing and Merging
+difflib>=1.0.0  # Built-in, but listed for documentation
+
+# System and Process Management
+psutil>=5.8.0  # System and process utilities
+threading>=1.0.0  # Built-in, but listed for documentation
+
+# Development and Testing
+pytest>=7.0.0
+pytest-qt>=4.0.0
+black>=22.0.0
+flake8>=4.0.0
+mypy>=0.950
+
+# Optional Dependencies for Extended Features
+# Uncomment these for additional functionality:
+
+# Advanced Hashing Algorithms
+# xxhash>=3.0.0
+# blake3>=0.3.0
+
+# Advanced Image Analysis
+# scikit-image>=0.19.0
+# face-recognition>=1.3.0
+
+# Machine Learning for Similarity Detection
+# scikit-learn>=1.1.0
+# tensorflow>=2.9.0
+
+# Advanced File Format Support
+# python-magic>=0.4.0
+# py7zr>=0.20.0
+# rarfile>=4.0
+
+# Network and Cloud Storage
+# requests>=2.28.0
+# boto3>=1.24.0  # AWS S3 support
+# google-cloud-storage>=2.5.0  # Google Cloud Storage
+
+# Advanced Configuration
+# pydantic>=1.9.0
+# click>=8.1.0  # Command line interface
+
+# Documentation Generation
+# sphinx>=5.0.0
+# sphinx-rtd-theme>=1.0.0
+
+# Package Information
+# This requirements file supports:
+# - Windows, macOS, and Linux
+# - Python 3.8+
+# - Optional GPU acceleration with CUDA
+# - Comprehensive file type support
+# - Enterprise-grade features
+# - Development and testing tools
+
+# Installation Instructions:
+# 
+# Basic Installation:
+# pip install -r requirements_enterprise.txt
+# 
+# For GPU Support (NVIDIA GPUs only):
+# 1. Install CUDA Toolkit 11.x or 12.x
+# 2. pip install cupy-cuda11x  # or cupy-cuda12x
+# 
+# For Development:
+# pip install -r requirements_enterprise.txt
+# pip install -e .  # If you have a setup.py
+# 
+# Platform-Specific Notes:
+# - Windows: All features supported
+# - macOS: GPU acceleration not available (no CUDA)
+# - Linux: Full feature support with proper CUDA installation

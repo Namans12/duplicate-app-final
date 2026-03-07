@@ -1,0 +1,17 @@
+PyQt6
+Pillow
+imagehash
+opencv-python
+sqlalchemy
+torch
+transformers
+sentence-transformers
+pydub
+ffmpeg-python
+xxhash
+ray
+mutagen
+# Audio fingerprinting
+pyacoustid
+librosa
+soundfile
