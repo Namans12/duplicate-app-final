@@ -125,3 +125,22 @@ python main_enhanced.py
 - **Try different algorithms** for different file types
 - **Adjust similarity thresholds** for text files to fine-tune results
 - **Use undo freely** - Ctrl+Z restores deleted files safely
+
+```mermaid
+flowchart TD
+    A[Choose folder type] --> B{Mostly music?}
+    B -- Yes --> B1[Music + Accuracy + Audio]
+    B -- No --> C{Mostly photos?}
+    C -- Yes --> C1[Photos + Accuracy + Perceptual]
+    C -- No --> D{Mostly videos?}
+    D -- Yes --> D1[Videos + Accuracy + Perceptual]
+    D -- No --> E{Mostly documents?}
+    E -- Yes --> E1[Documents + Accuracy + Semantic]
+    E -- No --> F{Mostly code?}
+    F -- Yes --> F1[Code + Accuracy + Text Content On]
+    F -- No --> G{Mostly archives?}
+    G -- Yes --> G1[Archives + Accuracy + SHA256]
+    G -- No --> H[General Files]
+    H --> H1[Performance for exact cleanup]
+    H --> H2[Accuracy for broader sweep]
+```
