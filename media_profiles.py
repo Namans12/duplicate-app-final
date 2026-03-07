@@ -8,13 +8,18 @@ import zipfile
 from copy import deepcopy
 from typing import Any, Dict, Iterable, Optional, Tuple
 
-import xxhash
+try:
+    import xxhash
+    HAS_XXHASH = True
+except ImportError:
+    xxhash = None
+    HAS_XXHASH = False
 
 try:
     from PIL import Image
     import imagehash
     HAS_IMAGE = True
-except Exception:
+except ImportError:
     HAS_IMAGE = False
     Image = None
     imagehash = None
@@ -22,21 +27,21 @@ except Exception:
 try:
     from skimage.metrics import structural_similarity
     HAS_SKIMAGE = True
-except Exception:
+except ImportError:
     structural_similarity = None
     HAS_SKIMAGE = False
 
 try:
     import fitz  # PyMuPDF
     HAS_PYMUPDF = True
-except Exception:
+except ImportError:
     fitz = None
     HAS_PYMUPDF = False
 
 try:
     from pypdf import PdfReader
     HAS_PYPDF = True
-except Exception:
+except ImportError:
     PdfReader = None
     HAS_PYPDF = False
 
@@ -102,7 +107,11 @@ def compute_exact_hash(file_path: str, hash_name: str = "XXH3_128") -> Optional[
         elif hash_name == "SHA256":
             h = hashlib.sha256()
         else:
-            h = xxhash.xxh3_128()
+            if HAS_XXHASH and xxhash is not None:
+                h = xxhash.xxh3_128()
+            else:
+                # Fallback to SHA256 when xxhash is not installed
+                h = hashlib.sha256()
         with open(file_path, "rb") as handle:
             for chunk in iter(lambda: handle.read(65536), b""):
                 h.update(chunk)

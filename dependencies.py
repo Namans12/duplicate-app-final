@@ -9,11 +9,9 @@ import logging
 import multiprocessing
 from typing import Optional, Any
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# DEP-1: Do NOT call logging.basicConfig() here. Log configuration belongs in the
+# application entry point (main.py / launcher.py). Calling it in a non-entry-point
+# module takes precedence over and silently overrides the host app's log setup.
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -279,8 +277,17 @@ def detect_gpu_backend() -> tuple:
     return "cpu", False
 
 
-# Initialize GPU backend on module load
-CUDA_BACKEND, HAS_CUDA = detect_gpu_backend()
+# DEP-2: GPU backend detection runs once at import time. This is intentional so that
+# all modules that `import dependencies` share the same detected backend without
+# re-probing. Set the environment variable SKIP_GPU_DETECT=1 to skip detection
+# (useful for test environments or machines without GPU drivers installed) — in that
+# case CUDA_BACKEND stays 'cpu' and HAS_CUDA stays False.
+# DEP-3: CUDA_BACKEND is named for historical reasons; its value can be 'cpu', 'cupy',
+# or 'torch'. Think of it as the compute backend name, not strictly a CUDA flag.
+if os.environ.get("SKIP_GPU_DETECT", "").strip() not in ("1", "true", "yes"):
+    CUDA_BACKEND, HAS_CUDA = detect_gpu_backend()
+else:
+    logger.info("GPU detection skipped (SKIP_GPU_DETECT is set)")
 
 
 def get_dependency_summary() -> dict:

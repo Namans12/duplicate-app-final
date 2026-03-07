@@ -17,12 +17,18 @@ def write_line(text=""):
 
 def check_dependencies():
     """Check if required dependencies are available."""
+    missing = []
     try:
         import PyQt6  # noqa: F401
-
-        return True, "PyQt6 available"
     except ImportError:
-        return False, "PyQt6 not found. Install with: pip install PyQt6"
+        missing.append("PyQt6 (install: pip install PyQt6)")
+    try:
+        import xxhash  # noqa: F401 — L-2: xxhash is a required, not optional dep
+    except ImportError:
+        missing.append("xxhash (install: pip install xxhash)")
+    if missing:
+        return False, "Missing required packages: " + ", ".join(missing)
+    return True, "PyQt6 and xxhash available"
 
 
 def launch_application(script_name):
@@ -34,10 +40,9 @@ def launch_application(script_name):
         command = [sys.executable, target]
         if target == bootstrap:
             command.append(script_name)
-        subprocess.run(command, check=True)
-    except subprocess.CalledProcessError as e:
-        write_line(f"Error launching {script_name}: {e}")
-        return False
+        result = subprocess.run(command)  # L-1: removed check=True — non-zero exit on close is not an error
+        if result.returncode != 0:
+            write_line(f"Note: {script_name} exited with code {result.returncode}")
     except KeyboardInterrupt:
         write_line(f"\n{script_name} interrupted by user")
         return False

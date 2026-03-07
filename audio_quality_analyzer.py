@@ -1,5 +1,6 @@
 import os
 import logging
+from collections import OrderedDict
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -7,7 +8,7 @@ logger = logging.getLogger(__name__)
 try:
     from mutagen import File as MutagenFile
     HAS_MUTAGEN = True
-except Exception:
+except ImportError:  # AQ-1: was bare `except Exception`, now precise
     HAS_MUTAGEN = False
     MutagenFile = None
 
@@ -31,14 +32,19 @@ class AudioQualityAnalyzer:
         'other': 1
     }
 
+    # AQ-2: Bounded LRU cache to prevent unbounded memory growth on large libraries
+    _CACHE_MAX_SIZE = 2048
+
     def __init__(self):
-        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
 
     def analyze_audio_quality(self, file_path: str) -> Optional[Dict[str, Any]]:
         """Return metadata + quality score for an audio file."""
         if not file_path:
             return None
         if file_path in self._cache:
+            # Move to end to mark as recently used
+            self._cache.move_to_end(file_path)
             return self._cache[file_path]
 
         metadata = self.get_audio_metadata(file_path)
@@ -46,6 +52,10 @@ class AudioQualityAnalyzer:
             return None
 
         metadata['quality_score'] = self.calculate_quality_score(metadata)
+
+        # AQ-2: Evict oldest entry when cache is full (LRU eviction)
+        if len(self._cache) >= self._CACHE_MAX_SIZE:
+            self._cache.popitem(last=False)
         self._cache[file_path] = metadata
         return metadata
 
@@ -110,7 +120,14 @@ class AudioQualityAnalyzer:
         sample_rate_score = float(metadata.get('sample_rate_hz') or 0.0) * 0.0005
         size_score = float(metadata.get('file_size_mb') or 0.0) * 0.5
 
-        return format_score + bitrate_score + sample_rate_score + size_score
+        score = format_score + bitrate_score + sample_rate_score + size_score
+
+        # AQ-3: Penalise score when metadata could not be fully read, so files with
+        # unreliable quality estimates rank lower than files with confirmed metadata.
+        if metadata.get('analysis_error'):
+            score *= 0.8
+
+        return score
 
     def compare_audio_files(self, files):
         """Return the best audio file path based on quality score."""

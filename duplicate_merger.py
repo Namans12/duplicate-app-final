@@ -5,12 +5,15 @@ Auto-suggests merging similar files with difference highlighting
 """
 import os
 import difflib
+import logging
 import shutil
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
 import json
 from datetime import datetime
 import tempfile
+
+logger = logging.getLogger(__name__)
 
 try:
     from PIL import Image
@@ -106,7 +109,7 @@ class FileMerger:
                         file_contents[file_path] = content
                         file_lines[file_path] = content.splitlines()
                 except Exception as e:
-                    print(f"Error reading {file_path}: {e}")
+                    logger.warning(f"Error reading {file_path}: {e}")
                     continue
                     
             if len(file_contents) < 2:
@@ -265,20 +268,19 @@ class FileMerger:
             
         try:
             image_info = {}
-            
-            # Analyze each image
+
+            # Analyze each image (HAS_PILLOW is guaranteed True here due to early return above)
             for file_path in files:
                 try:
-                    if HAS_PILLOW:
-                        with Image.open(file_path) as img:
-                            image_info[file_path] = {
-                                "size": img.size,
-                                "mode": img.mode,
-                                "format": img.format,
-                                "file_size": os.path.getsize(file_path)
-                            }
+                    with Image.open(file_path) as img:
+                        image_info[file_path] = {
+                            "size": img.size,
+                            "mode": img.mode,
+                            "format": img.format,
+                            "file_size": os.path.getsize(file_path)
+                        }
                 except Exception as e:
-                    print(f"Error analyzing image {file_path}: {e}")
+                    logger.warning(f"Error analyzing image {file_path}: {e}")
                     
             if len(image_info) < 2:
                 return analysis
@@ -296,7 +298,8 @@ class FileMerger:
                             "type": "image_quality_merge",
                             "files": [file1, file2],
                             "description": "Same dimensions, different file sizes - possible quality difference",
-                            "recommended_action": "keep_larger" if info1["file_size"] > info2["file_size"] else "keep_larger",
+                            "recommended_action": "keep_file1" if info1["file_size"] > info2["file_size"] else "keep_file2",  # DM-1 fix: was always "keep_larger"
+                            "larger_file": file1 if info1["file_size"] > info2["file_size"] else file2,
                             "confidence": 0.8
                         }
                         analysis["merge_suggestions"].append(suggestion)
@@ -324,7 +327,7 @@ class FileMerger:
                     with open(file_path, 'r', encoding='utf-8') as f:
                         json_data[file_path] = json.load(f)
                 except Exception as e:
-                    print(f"Error loading JSON {file_path}: {e}")
+                    logger.warning(f"Error loading JSON {file_path}: {e}")
                     
             if len(json_data) < 2:
                 return analysis
@@ -512,8 +515,9 @@ class FileMerger:
             if output_path is None:
                 output_path = primary_file
             
-            assert output_path is not None  # Type hint for mypy
-                
+            if output_path is None:
+                raise ValueError("output_path cannot be None")  # DM-4: assert removed by python -O
+
             # Execute merge based on strategy
             strategy = suggestion.get("merge_strategy", "manual_review")
             
@@ -554,8 +558,9 @@ class FileMerger:
             if output_path is None:
                 output_path = best_file
             
-            assert output_path is not None  # Type hint for mypy
-                
+            if output_path is None:
+                raise ValueError("output_path cannot be None")  # DM-4: assert removed by python -O
+
             if output_path != best_file:
                 shutil.copy2(best_file, output_path)
                 
@@ -588,8 +593,9 @@ class FileMerger:
             if output_path is None:
                 output_path = files[0]
             
-            assert output_path is not None  # Type hint for mypy
-                
+            if output_path is None:
+                raise ValueError("output_path cannot be None")  # DM-4: assert removed by python -O
+
             # Write merged JSON
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(merged_data, f, indent=2, ensure_ascii=False)

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 GPU Acceleration Module for Performance Enhancement
 CUDA-based acceleration for perceptual hashing and similarity calculations

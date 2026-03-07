@@ -4,12 +4,15 @@ Database Manager for Persistent Scan Results
 Handles SQLite database operations for incremental scanning
 """
 import json
+import logging
 import os
 import sqlite3
 import threading
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
@@ -181,9 +184,15 @@ class DatabaseManager:
 
             text_embedding = None
             if "text_embedding" in hashes:
-                import pickle
-
-                text_embedding = pickle.dumps(hashes["text_embedding"])
+                # DB-4: Use JSON instead of pickle to avoid deserialization security vulnerability.
+                # Numpy arrays are converted to a list of floats before JSON encoding.
+                raw_emb = hashes["text_embedding"]
+                try:
+                    # Support numpy arrays, lists, and anything with a tolist() method
+                    emb_list = raw_emb.tolist() if hasattr(raw_emb, "tolist") else list(raw_emb)
+                    text_embedding = json.dumps(emb_list).encode("utf-8")
+                except Exception as e:
+                    logger.warning(f"Could not serialize text_embedding for {file_path}: {e}")
 
             cursor.execute(
                 """
@@ -260,7 +269,10 @@ class DatabaseManager:
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     def get_incremental_files(self, directory: str) -> Tuple[List[str], List[str]]:
-        """Get files that need scanning (new or modified)."""
+        """Get files that need scanning (new or modified).
+
+        DB-2 fix: uses a single batch SQL query instead of one query per file.
+        """
         new_files = []
         modified_files = []
         all_files = []
@@ -269,28 +281,35 @@ class DatabaseManager:
             for file_name in files:
                 all_files.append(os.path.join(root, file_name))
 
+        if not all_files:
+            return new_files, modified_files
+
+        # Build a dict of current filesystem info in one pass
+        current_info: Dict[str, Tuple[int, float]] = {}
+        for file_path in all_files:
+            try:
+                if os.path.exists(file_path):
+                    stat = os.stat(file_path)
+                    current_info[file_path] = (stat.st_size, stat.st_mtime)
+            except OSError:
+                pass
+
+        # Fetch all cached entries in a single query and compare in Python (DB-2 fix)
         with self._lock, self._connect() as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                "SELECT file_path, file_size, modification_time FROM file_cache",
+            )
+            cached: Dict[str, Tuple[int, float]] = {
+                row[0]: (row[1], row[2]) for row in cursor.fetchall()
+            }
 
-            for file_path in all_files:
-                if not os.path.exists(file_path):
-                    continue
-
-                current_size = os.path.getsize(file_path)
-                current_mtime = os.path.getmtime(file_path)
-
-                cursor.execute(
-                    """
-                    SELECT file_size, modification_time FROM file_cache
-                    WHERE file_path = ?
-                    """,
-                    (file_path,),
-                )
-
-                row = cursor.fetchone()
-                if row is None:
-                    new_files.append(file_path)
-                elif row[0] != current_size or row[1] != current_mtime:
+        for file_path, (cur_size, cur_mtime) in current_info.items():
+            if file_path not in cached:
+                new_files.append(file_path)
+            else:
+                cached_size, cached_mtime = cached[file_path]
+                if cached_size != cur_size or cached_mtime != cur_mtime:
                     modified_files.append(file_path)
 
         return new_files, modified_files
@@ -361,7 +380,7 @@ class DatabaseManager:
 
             return True
         except Exception as e:
-            print(f"Export failed: {e}")
+            logger.error(f"Export failed: {e}")  # DB-1: was print(), now uses logger
             return False
 
     def record_performance_metric(self, session_id: str, metric_name: str, metric_value: float):

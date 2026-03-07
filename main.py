@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Duplicate File Finder with Advanced Comparison and File Management
 Features: Recycle Bin, Scan Filters, Progress with ETA, Export Results
@@ -16,7 +17,7 @@ import multiprocessing
 from copy import deepcopy
 from datetime import datetime, timedelta
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 from functools import partial
 from queue import Queue
@@ -36,52 +37,45 @@ from PyQt6.QtGui import QPixmap, QAction, QShortcut, QKeySequence, QIcon, QDragE
 import logging
 logger = logging.getLogger(__name__)
 
-# Try to import send2trash for recycle bin support
-try:
-    from send2trash import send2trash
-    HAS_SEND2TRASH = True
-except ImportError:
-    HAS_SEND2TRASH = False
-
 # Optional imports with fallbacks
 try:
     from PIL import Image
     import imagehash
     HAS_PILLOW = True
-except Exception:
+except ImportError:
     HAS_PILLOW = False
+    Image = None
+    imagehash = None
 
 try:
     import cv2
     HAS_CV2 = True
-except Exception:
+except ImportError:
     HAS_CV2 = False
 
 try:
     from sentence_transformers import SentenceTransformer
     HAS_TRANSFORMERS = True
-except Exception:
+except ImportError:
     HAS_TRANSFORMERS = False
 
 try:
     from pydub import AudioSegment
-    import numpy as np
     HAS_AUDIO = True
-except Exception:
+except ImportError:
     HAS_AUDIO = False
 
-# Try to import numpy for optimized operations
+# Try to import numpy for optimized operations (independent of pydub)
 try:
     import numpy as np
     HAS_NUMPY = True
-except Exception:
+except ImportError:
+    np = None
     HAS_NUMPY = False
 
 # CUDA / GPU Acceleration imports
 HAS_CUDA = False
 CUDA_BACKEND = 'cpu'
-cp = None
-torch_module = None
 
 # Video fingerprinting support
 HAS_VIDEO_FINGERPRINTER = False
@@ -171,6 +165,15 @@ from dependencies import (
     AppConfig, HAS_CUDA as DEP_HAS_CUDA, CUDA_BACKEND as DEP_CUDA_BACKEND,
     HAS_SEND2TRASH as DEP_SEND2TRASH, send2trash_func
 )
+
+# CF-2: Fall back to dependency-level GPU detection if gpu_accelerator failed to load
+if not HAS_CUDA and DEP_HAS_CUDA:
+    HAS_CUDA = DEP_HAS_CUDA
+    CUDA_BACKEND = DEP_CUDA_BACKEND
+
+# CF-3: Consolidate send2trash — use single source from dependencies module
+HAS_SEND2TRASH = DEP_SEND2TRASH
+send2trash = send2trash_func  # Alias so existing call sites work unchanged
 from audio_quality_analyzer import AudioQualityAnalyzer
 from media_profiles import (
     compare_archive_files,
@@ -985,7 +988,7 @@ class UndoManager:
     """Manages file backup and restore operations for undo functionality"""
     
     def __init__(self):
-        self.backup_dir = os.path.join(os.getcwd(), ".duplicate_finder_backup")
+        self.backup_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".duplicate_finder_backup")
         self.operations = []
         self.max_operations = 100
         self._ensure_backup_dir()
@@ -1658,19 +1661,8 @@ class EnhancedScanThread(QThread):
                 
             except Exception as e:
                 logger.error(f"Error processing {file_path}: {e}")
-        
-        duplicates = {k: v for k, v in file_hashes.items() if len(v) > 1}
-        
-        # Phase 2: Find similar files (not exact duplicates)
-        self.status_update.emit("Finding similar files...")
-        similar_files = {}
-        
-        if self.comparison_settings['find_similar']:
-            similar_files = self.find_similar_files(files, duplicates)
-        
-        self.progress.emit(100)
-        self.status_update.emit("Analysis complete!")
-        self.finished.emit(duplicates, similar_files)
+
+        return file_hashes
     
     def compute_hash(self, file_path):
         try:
@@ -1707,8 +1699,8 @@ class EnhancedScanThread(QThread):
         ext = os.path.splitext(file_path)[1].lower()
         if ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif']:
             try:
-                img = Image.open(file_path)
-                return str(imagehash.phash(img))
+                with Image.open(file_path) as img:
+                    return str(imagehash.phash(img))
             except Exception:
                 return self.md5_hash(file_path)
         else:
@@ -1728,16 +1720,20 @@ class EnhancedScanThread(QThread):
         settings = self.comparison_settings
         total_comparisons = len(non_duplicate_files) * (len(non_duplicate_files) - 1) // 2
         comparison_count = 0
-        
+
+        # Define extension sets once outside the O(n²) loop (M-5 fix)
+        video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpeg', '.mpg'}
+        audio_extensions = {'.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.m4a', '.opus', '.aiff', '.ape', '.alac', '.wv'}
+
         for i, file1 in enumerate(non_duplicate_files):
             for j, file2 in enumerate(non_duplicate_files[i+1:], i+1):
                 comparison_count += 1
-                
+
                 # Update progress (second 50%)
                 if comparison_count % 100 == 0:
                     progress = 50 + int((comparison_count / total_comparisons) * 50)
                     self.progress.emit(min(progress, 95))
-                
+
                 is_similar = False
                 similarity_reasons = []
                 name_similar = False
@@ -1746,10 +1742,8 @@ class EnhancedScanThread(QThread):
                 media_type2 = get_media_type(file2)
                 shared_media_type = media_type1 if media_type1 == media_type2 else None
                 profile = get_profile_for_path(file1, self.media_profiles) if shared_media_type else None
-                
+
                 # Check for similar videos using video fingerprinting
-                video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpeg', '.mpg'}
-                audio_extensions = {'.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.m4a', '.opus', '.aiff', '.ape', '.alac', '.wv'}
                 ext1 = os.path.splitext(file1)[1].lower()
                 ext2 = os.path.splitext(file2)[1].lower()
 

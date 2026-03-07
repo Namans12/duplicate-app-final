@@ -57,15 +57,17 @@ class StreamingHasher:
     def _streaming_hash(self, file_path: str, hasher) -> str:
         """Hash file using streaming chunks"""
         try:
+            chunk_count = 0
             with open(file_path, 'rb') as f:
                 while chunk := f.read(self.chunk_size):
                     hasher.update(chunk)
-                    # Yield control periodically for responsiveness
-                    if threading.current_thread() != threading.main_thread():
-                        time.sleep(0.001)  # 1ms yield
-                        
+                    chunk_count += 1
+                    # Yield control every 1000 chunks (~8 MB) instead of every chunk
+                    if threading.current_thread() != threading.main_thread() and chunk_count % 1000 == 0:
+                        time.sleep(0.001)  # 1ms yield (MO-1 fix: was per-chunk, now per ~8MB)
+
             return hasher.hexdigest()
-            
+
         except Exception as e:
             logger.error(f"Streaming hash error for {file_path}: {e}")
             return ""
@@ -80,8 +82,8 @@ class StreamingHasher:
                         chunk_end = min(i + self.chunk_size, len(mm))
                         hasher.update(mm[i:chunk_end])
                         
-                        # Yield control periodically
-                        if i % (self.chunk_size * 100) == 0:  # Every 100 chunks
+                        # Yield control periodically (MO-2 fix: skip i=0 so no sleep before work begins)
+                        if i > 0 and i % (self.chunk_size * 100) == 0:  # Every 100 chunks
                             time.sleep(0.001)
                             
             return hasher.hexdigest()
@@ -153,6 +155,7 @@ class MemoryManager:
             self.current_usage += size_bytes
             if identifier:
                 self.access_times[identifier] = time.time()
+                self.cache_sizes[identifier] = size_bytes  # MO-4: track size so cleanup can free correctly
             return True
             
     def free_memory(self, size_bytes: int, identifier: Optional[str] = None):
@@ -215,7 +218,7 @@ class MemoryManager:
             return {
                 "current_usage_mb": self.current_usage / (1024 * 1024),
                 "max_usage_mb": self.max_memory_usage / (1024 * 1024),
-                "usage_percent": (self.current_usage / self.max_memory_usage) * 100,
+                "usage_percent": (self.current_usage / max(self.max_memory_usage, 1)) * 100,  # MO-3: guard div/0
                 "cached_items": len(self.cached_data),
                 "available_mb": (self.max_memory_usage - self.current_usage) / (1024 * 1024)
             }
@@ -427,7 +430,9 @@ class IncrementalScanner:
         
         return estimates
 
-# Global instances
+# MO-5: These global instances use hard-coded defaults (chunk_size=8192, max_memory=100MB/500MB).
+# If you need different settings, instantiate StreamingHasher/MemoryManager/IncrementalScanner
+# directly with your desired parameters rather than relying on these shared instances.
 streaming_hasher = StreamingHasher()
 memory_manager = MemoryManager()
 incremental_scanner = IncrementalScanner()

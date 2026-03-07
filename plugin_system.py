@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Plugin System for Custom Algorithms and File Type Support
 Extensible architecture for user-created plugins
@@ -162,7 +163,15 @@ Demonstrates how to create a custom hashing algorithm
 """
 import hashlib
 import os
+import sys
+from pathlib import Path
 from typing import List
+
+# PS-3 fix: ensure the app root is on sys.path so plugin_system can be imported
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from plugin_system import HashingPlugin
 
 class ExampleHashPlugin(HashingPlugin):
@@ -395,12 +404,12 @@ def create_plugin():
             if plugin_dir.exists():
                 self._load_plugins_from_directory(plugin_dir, plugin_dict, base_class)
                 
-        logger.info(f"✅ Loaded {len(self.hashing_plugins)} hashing plugins")
-        logger.info(f"✅ Loaded {len(self.file_type_plugins)} file type plugins")
-        logger.info(f"✅ Loaded {len(self.similarity_plugins)} similarity plugins")
-        
+        logger.info(f"Loaded {len(self.hashing_plugins)} hashing plugins")
+        logger.info(f"Loaded {len(self.file_type_plugins)} file type plugins")
+        logger.info(f"Loaded {len(self.similarity_plugins)} similarity plugins")
+
         if self.plugin_errors:
-            logger.warning(f"⚠️ {len(self.plugin_errors)} plugin loading errors")
+            logger.warning(f"{len(self.plugin_errors)} plugin loading error(s) occurred")
             
     def _load_plugins_from_directory(self, directory: Path, plugin_dict: Dict, base_class):
         """Load plugins from a specific directory"""
@@ -412,7 +421,7 @@ def create_plugin():
                 plugin = self._load_plugin_file(plugin_file, base_class)
                 if plugin:
                     plugin_dict[plugin.name] = plugin
-                    logger.info(f"  ✅ Loaded {plugin.name} v{plugin.version}")
+                    logger.info(f"  Loaded plugin: {plugin.name} v{plugin.version}")
                     
             except Exception as e:
                 error_info = {
@@ -421,7 +430,7 @@ def create_plugin():
                     "type": base_class.__name__
                 }
                 self.plugin_errors.append(error_info)
-                logger.error(f"  ❌ Failed to load {plugin_file.name}: {e}")
+                logger.error(f"  Failed to load {plugin_file.name}: {e}")
                 
     def _load_plugin_file(self, plugin_file: Path, base_class) -> Optional[PluginInterface]:
         """Load a single plugin file"""
@@ -430,6 +439,8 @@ def create_plugin():
             return None
             
         module = importlib.util.module_from_spec(spec)
+        # SECURITY WARNING (PS-1): exec_module executes arbitrary Python code from the plugin file.
+        # Only load plugins from trusted sources. Do not place untrusted .py files in the plugins directory.
         spec.loader.exec_module(module)
         
         # Look for create_plugin function
@@ -441,7 +452,13 @@ def create_plugin():
         # Look for plugin classes
         for name, obj in inspect.getmembers(module, inspect.isclass):
             if issubclass(obj, base_class) and obj != base_class:
-                return obj()
+                try:
+                    return obj()
+                except TypeError as e:
+                    logger.error(
+                        f"Plugin class '{name}' in {plugin_file.name} requires constructor arguments "
+                        f"(all plugin __init__ must accept zero arguments): {e}"
+                    )
                 
         return None
         
@@ -583,6 +600,6 @@ def create_plugin():
         except Exception as e:
             logger.error(f"Plugin installation failed: {e}")
             return False
-
-# Global plugin manager instance
-plugin_manager = PluginManager()
+# NOTE (PS-4): No module-level PluginManager() instance is created here.
+# Callers should instantiate PluginManager explicitly when the plugin system is needed.
+# This avoids disk I/O, directory creation, and plugin code execution at import time.
