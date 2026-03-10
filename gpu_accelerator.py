@@ -9,9 +9,13 @@ import sys
 import multiprocessing
 import warnings
 import builtins
+import logging
+import concurrent.futures
 import numpy as np
 from typing import List, Optional, Tuple, Any, Dict
 import time
+
+logger = logging.getLogger(__name__)
 
 
 def safe_print(*args, **kwargs):
@@ -1533,9 +1537,11 @@ class AudioFingerprinter:
     MFCC_HOP_LENGTH = 512     # Hop length for STFT
     MFCC_N_FFT = 2048         # FFT window size
     
-    # Similarity thresholds
-    CHROMAPRINT_THRESHOLD = 0.85   # Chromaprint similarity (0-1)
-    MFCC_THRESHOLD = 0.80          # MFCC cosine similarity (0-1)
+    # Similarity thresholds — tuned for "truly same recording" detection (AS-1).
+    # 0.85/0.80 matched too many different tracks from the same artist/album.
+    # 0.92/0.90 requires near-bit-identical acoustic content (same song, any encode).
+    CHROMAPRINT_THRESHOLD = 0.92   # Chromaprint similarity (0-1)
+    MFCC_THRESHOLD = 0.90          # MFCC cosine similarity (0-1)
     
     def __init__(self):
         self.has_chromaprint = HAS_CHROMAPRINT
@@ -1632,24 +1638,60 @@ class AudioFingerprinter:
             
         return result
     
+    @staticmethod
+    def _chromaprint_call(audio_path: str):
+        """Run acoustid.fingerprint_file with C-level stderr suppressed (mpg123 noise)."""
+        # Redirect fd 2 (C-level stderr) to /dev/null to silence libmpg123 diagnostics
+        devnull_fd = None
+        saved_fd = None
+        try:
+            devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            saved_fd = os.dup(2)
+            os.dup2(devnull_fd, 2)
+        except OSError:
+            # fd manipulation not supported in this environment — proceed without suppression
+            pass
+        try:
+            return acoustid.fingerprint_file(audio_path)
+        finally:
+            try:
+                if saved_fd is not None:
+                    os.dup2(saved_fd, 2)
+                    os.close(saved_fd)
+                if devnull_fd is not None:
+                    os.close(devnull_fd)
+            except OSError:
+                pass
+
     def _compute_chromaprint(self, audio_path: str) -> Optional[Dict[str, Any]]:
         """
         Compute Chromaprint (AcoustID) fingerprint.
-        
+
         This is the primary fingerprinting method - fast and robust.
         Handles format conversions, bitrate changes, volume normalization.
+        A 30-second timeout prevents hanging on severely corrupted MP3 files.
         """
         if not self.has_chromaprint:
             return None
-            
+
         try:
-            # acoustid.fingerprint_file returns (duration, fingerprint)
-            duration, fingerprint = acoustid.fingerprint_file(audio_path)
-            
+            # AF-1: Run in worker thread with timeout so a corrupted file (e.g. one
+            # that causes mpg123 to spin) cannot block the whole scan indefinitely.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+                _future = _ex.submit(self._chromaprint_call, audio_path)
+                try:
+                    duration, fingerprint = _future.result(timeout=30)
+                except concurrent.futures.TimeoutError:
+                    logger.warning(
+                        "Chromaprint timeout (30s) for %s — skipping",
+                        os.path.basename(audio_path),
+                    )
+                    return None
+
             # Silently ignore if fingerprint_file returns None (corrupted audio)
             if duration is None or fingerprint is None:
                 return None
-            
+
             return {
                 "fingerprint": fingerprint,
                 "duration": duration
@@ -1661,32 +1703,66 @@ class AudioFingerprinter:
     def _compute_mfcc_fingerprint(self, audio_path: str) -> Optional[np.ndarray]:
         """
         Compute MFCC-based fingerprint with GPU acceleration.
-        
+
         MFCCs capture the timbral/spectral characteristics of audio.
         We compute mean + std of MFCCs across time for a fixed-size fingerprint.
-        
+
         GPU acceleration is applied to:
         1. FFT computation (via CuPy if available)
         2. Matrix operations for normalization
+
+        A 30-second timeout prevents hanging on severely corrupted audio files.
         """
         if not self.has_librosa:
             return None
-            
+
         try:
-            # Suppress librosa/audioread warnings during load
-            import warnings
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=UserWarning)
-                warnings.filterwarnings('ignore', message='.*Xing.*')
-                warnings.filterwarnings('ignore', message='.*PySoundFile.*')
-                
-                # Load audio (first N seconds, mono, resampled)
-                y, sr = librosa.load(
-                    audio_path, 
-                    sr=self.MFCC_SAMPLE_RATE, 
-                    mono=True, 
-                    duration=self.MFCC_DURATION
-                )
+            # AF-2: librosa.load() calls audioread which calls the audio decoder
+            # (ffmpeg / mpg123). On a corrupted file this can block indefinitely.
+            # Run it in a worker thread with a timeout so one bad file cannot
+            # stall the entire scan.
+            import warnings as _warnings
+
+            def _load_audio():
+                with _warnings.catch_warnings():
+                    _warnings.filterwarnings('ignore', category=UserWarning)
+                    _warnings.filterwarnings('ignore', message='.*Xing.*')
+                    _warnings.filterwarnings('ignore', message='.*PySoundFile.*')
+                    devnull_fd = None
+                    saved_fd = None
+                    try:
+                        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+                        saved_fd = os.dup(2)
+                        os.dup2(devnull_fd, 2)
+                    except OSError:
+                        pass
+                    try:
+                        return librosa.load(
+                            audio_path,
+                            sr=self.MFCC_SAMPLE_RATE,
+                            mono=True,
+                            duration=self.MFCC_DURATION,
+                        )
+                    finally:
+                        try:
+                            if saved_fd is not None:
+                                os.dup2(saved_fd, 2)
+                                os.close(saved_fd)
+                            if devnull_fd is not None:
+                                os.close(devnull_fd)
+                        except OSError:
+                            pass
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+                _future = _ex.submit(_load_audio)
+                try:
+                    y, sr = _future.result(timeout=30)
+                except concurrent.futures.TimeoutError:
+                    logger.warning(
+                        "MFCC load timeout (30s) for %s — skipping",
+                        os.path.basename(audio_path),
+                    )
+                    return None
             
             if len(y) == 0:
                 return None
@@ -1827,8 +1903,11 @@ class AudioFingerprinter:
                 duration_ratio = min(d1, d2) / max(d1, d2)
                 details["duration_match"] = duration_ratio
                 
-                # Skip if durations are too different (>20% difference)
-                if duration_ratio < 0.8:
+                # AS-1: Skip if durations differ by more than 3%.
+                # Re-encoded copies of the same song are within ±1-2 s; a 3% window
+                # allows up to ~5 s variance on a 3-minute track while still rejecting
+                # different songs that happen to share a similar running time.
+                if duration_ratio < 0.97:
                     return False, 0.0, details
         
         # Chromaprint comparison
@@ -1861,7 +1940,8 @@ class AudioFingerprinter:
             # Weighted average: chromaprint is more reliable
             combined = 0.7 * cp_score + 0.3 * mfcc_score
             details["method_used"] = "hybrid_combined"
-            is_similar = combined >= 0.8
+            # AS-1: require 0.88 combined (≈ CP=0.91 + MFCC=0.81) — was 0.80
+            is_similar = combined >= 0.88
             return is_similar, combined, details
         
         # Single method result

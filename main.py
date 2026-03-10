@@ -1332,6 +1332,12 @@ class EnhancedScanThread(QThread):
     
     def cancel(self):
         self.is_cancelled = True
+
+    def _pause_or_cancel_requested(self) -> bool:
+        """Yield while paused and report whether work should stop."""
+        while self.is_paused and not self.is_cancelled:
+            time.sleep(0.1)
+        return self.is_cancelled
         
     def run(self):
         self.start_time = time.time()
@@ -1388,7 +1394,14 @@ class EnhancedScanThread(QThread):
         similar_files = {}
         
         if self.comparison_settings['find_similar']:
-            similar_files = self.find_similar_files(files, duplicates)
+            try:
+                similar_files = self.find_similar_files(files, duplicates)
+            except MemoryError:
+                logger.error("Memory exhausted during similarity scan — results are partial")
+                self.status_update.emit("Warning: Memory exhausted; similarity results may be incomplete")
+            except Exception as e:
+                logger.error("Similarity scan crashed (%s): %s", type(e).__name__, e, exc_info=True)
+                self.status_update.emit(f"Warning: Similarity scan stopped ({type(e).__name__})")
         
         self.progress.emit(100)
         elapsed = time.time() - self.start_time
@@ -1483,39 +1496,58 @@ class EnhancedScanThread(QThread):
             self.gpu_status.emit(f"🎵 Audio fingerprinting: {len(audio_files)} files")
             
             try:
-                # Use batch audio fingerprinting
-                audio_results = audio_fingerprinter.batch_fingerprint_audio(
-                    audio_files, 
-                    method="hybrid"  # Use both Chromaprint and MFCC
-                )
-                
-                for path, fingerprint in audio_results.items():
-                    if self.is_cancelled:
-                        return file_hashes
-                    if fingerprint:
-                        # Create a unique hash from the fingerprint
-                        # Combine chromaprint and mfcc for a robust identifier
-                        fp_parts = []
-                        if fingerprint.get('chromaprint'):
-                            fp_parts.append(f"cp:{fingerprint['chromaprint'][:32]}")
-                        if fingerprint.get('mfcc'):
-                            # Use first few MFCC values as a hash
-                            mfcc = fingerprint['mfcc']
-                            if isinstance(mfcc, list) and len(mfcc) >= 4:
-                                mfcc_hash = "_".join(f"{v:.2f}" for v in mfcc[:4])
-                                fp_parts.append(f"mfcc:{mfcc_hash}")
-                        
-                        if fp_parts:
-                            audio_hash = f"audio:{'|'.join(fp_parts)}"
-                            file_hashes[audio_hash].append(path)
-                    
-                    processed += 1
-                    self.current_file.emit(os.path.basename(path))
-                    
-                    if processed % 10 == 0:
+                # HP-2: Run fingerprint computation in parallel across multiple CPU cores.
+                # Fingerprinting is CPU-bound (audio decode + MFCC), so multiple workers
+                # give a near-linear speed-up up to the number of physical cores.
+                # HP-3: Results are saved to self._phase1_audio_fp_cache so Phase 2
+                # can reuse them and skip a second full decode pass.
+                from concurrent.futures import ThreadPoolExecutor as _TPool, as_completed as _asc
+                _n_workers = min(4, os.cpu_count() or 2)
+                _phase1_cache: dict = {}
+
+                with _TPool(max_workers=_n_workers) as _fp_exec:
+                    _futures = {
+                        _fp_exec.submit(
+                            audio_fingerprinter.compute_fingerprint, path, "hybrid"
+                        ): path
+                        for path in audio_files
+                    }
+                    for _fut in _asc(_futures):
+                        path = _futures[_fut]
+                        if self.is_cancelled:
+                            break
+                        try:
+                            fingerprint = _fut.result()
+                        except Exception:
+                            fingerprint = None
+
+                        _phase1_cache[path] = fingerprint
+                        self.current_file.emit(os.path.basename(path))
+
+                        if fingerprint:
+                            # Create a unique hash from the fingerprint
+                            # Combine chromaprint and mfcc for a robust identifier
+                            fp_parts = []
+                            if fingerprint.get('chromaprint'):
+                                fp_parts.append(f"cp:{fingerprint['chromaprint'][:32]}")
+                            if fingerprint.get('mfcc'):
+                                # Use first few MFCC values as a hash
+                                mfcc = fingerprint['mfcc']
+                                if isinstance(mfcc, list) and len(mfcc) >= 4:
+                                    mfcc_hash = "_".join(f"{v:.2f}" for v in mfcc[:4])
+                                    fp_parts.append(f"mfcc:{mfcc_hash}")
+
+                            if fp_parts:
+                                audio_hash = f"audio:{'|'.join(fp_parts)}"
+                                file_hashes[audio_hash].append(path)
+
+                        processed += 1
                         progress = int((processed / total_files) * 50)
                         self.progress.emit(progress)
                         self.files_processed.emit(processed, total_files)
+
+                # Make Phase 1 fingerprints available to find_similar_files (HP-3)
+                self._phase1_audio_fp_cache = _phase1_cache
                         
             except Exception as e:
                 logger.error(f"Audio fingerprinting error: {e}")
@@ -1718,34 +1750,109 @@ class EnhancedScanThread(QThread):
         non_duplicate_files = [f for f in files if f not in duplicate_files]
         
         settings = self.comparison_settings
+        hash_type = settings.get('hash_type', 'MD5')
         total_comparisons = len(non_duplicate_files) * (len(non_duplicate_files) - 1) // 2
         comparison_count = 0
 
         # Define extension sets once outside the O(n²) loop (M-5 fix)
         video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpeg', '.mpg'}
         audio_extensions = {'.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.m4a', '.opus', '.aiff', '.ape', '.alac', '.wv'}
+        enable_audio_similarity = hash_type == 'Audio' and HAS_AUDIO_FINGERPRINTER
+        enable_video_similarity = hash_type == 'Perceptual' and HAS_VIDEO_FINGERPRINTER
+
+        # AF-3: Pre-compute fingerprints ONCE per unique file before the O(n²) loop.
+        # Without this, with N audio/video files, each file's fingerprint is recomputed
+        # N-1 times (O(n²) total decoder calls). With this cache it's exactly O(n).
+        # HP-3: Seed audio_fp_cache from Phase 1 results when hash_type == 'Audio',
+        # so files already decoded in Phase 1 are never decoded a second time.
+        audio_fp_cache: dict = dict(getattr(self, '_phase1_audio_fp_cache', {}))
+        video_fp_cache: dict = {}
+        audio_candidates = []
+        video_candidates = []
+
+        if enable_audio_similarity:
+            # Only queue files whose fingerprint was not carried over from Phase 1
+            audio_candidates = [
+                f for f in non_duplicate_files
+                if os.path.splitext(f)[1].lower() in audio_extensions
+                and f not in audio_fp_cache
+            ]
+        if enable_video_similarity:
+            video_candidates = [
+                f for f in non_duplicate_files
+                if os.path.splitext(f)[1].lower() in video_extensions
+            ]
+
+        total_precompute = len(audio_candidates) + len(video_candidates)
+        precomputed = 0
+        phase2_start = 60 if total_precompute else 50
+        phase2_span = 35 if total_precompute else 45
+
+        if enable_audio_similarity and audio_candidates:
+            self.status_update.emit(
+                f"Computing audio fingerprints ({len(audio_candidates)} files)…"
+            )
+            for _idx, _af in enumerate(audio_candidates, start=1):
+                if self._pause_or_cancel_requested():
+                    return dict(similar_files)
+                audio_fp_cache[_af] = audio_fingerprinter.compute_fingerprint(
+                    _af, method="hybrid"
+                )
+                precomputed += 1
+                progress = 50 + int((precomputed / total_precompute) * 10)
+                self.progress.emit(min(progress, 60))
+
+        if enable_video_similarity and video_candidates:
+            self.status_update.emit(
+                f"Computing video fingerprints ({len(video_candidates)} files)…"
+            )
+            for _idx, _vf in enumerate(video_candidates, start=1):
+                if self._pause_or_cancel_requested():
+                    return dict(similar_files)
+                video_fp_cache[_vf] = video_fingerprinter.compute_video_fingerprint(
+                    _vf, num_keyframes=5
+                )
+                precomputed += 1
+                progress = 50 + int((precomputed / total_precompute) * 10)
+                self.progress.emit(min(progress, 60))
+
+        # AF-4: Pre-compute per-file derived properties — extension, media type, and
+        # profile only depend on the file path yet were being computed O(n²) times inside
+        # the inner loop.  Building these dicts once reduces that to O(n).
+        ext_cache = {f: os.path.splitext(f)[1].lower() for f in non_duplicate_files}
+        media_type_cache = {f: get_media_type(f) for f in non_duplicate_files}
+        profile_cache = {f: get_profile_for_path(f, self.media_profiles) for f in non_duplicate_files}
 
         for i, file1 in enumerate(non_duplicate_files):
+            if self._pause_or_cancel_requested():
+                return dict(similar_files)
+            # AF-4: file1 properties only depend on file1 — constant across all j
+            # pairings. Compute once per outer iteration, not once per inner iteration.
+            ext1 = ext_cache[file1]
+            media_type1 = media_type_cache[file1]
+            profile1 = profile_cache[file1]
             for j, file2 in enumerate(non_duplicate_files[i+1:], i+1):
+                if self._pause_or_cancel_requested():
+                    return dict(similar_files)
                 comparison_count += 1
 
                 # Update progress (second 50%)
                 if comparison_count % 100 == 0:
-                    progress = 50 + int((comparison_count / total_comparisons) * 50)
+                    if total_comparisons:
+                        progress = phase2_start + int((comparison_count / total_comparisons) * phase2_span)
+                    else:
+                        progress = 95
                     self.progress.emit(min(progress, 95))
 
                 is_similar = False
                 similarity_reasons = []
                 name_similar = False
                 size_similar = False
-                media_type1 = get_media_type(file1)
-                media_type2 = get_media_type(file2)
+                media_type2 = media_type_cache[file2]
                 shared_media_type = media_type1 if media_type1 == media_type2 else None
-                profile = get_profile_for_path(file1, self.media_profiles) if shared_media_type else None
-
-                # Check for similar videos using video fingerprinting
-                ext1 = os.path.splitext(file1)[1].lower()
-                ext2 = os.path.splitext(file2)[1].lower()
+                profile = profile1 if shared_media_type else None
+                # ext1 is pre-fetched in the outer loop (constant for all j)
+                ext2 = ext_cache[file2]
 
                 if shared_media_type and profile and profile.get("enable_fuzzy", False):
                     if shared_media_type == "images":
@@ -1781,14 +1888,14 @@ class EnhancedScanThread(QThread):
                 if (
                     ext1 in video_extensions
                     and ext2 in video_extensions
-                    and HAS_VIDEO_FINGERPRINTER
+                    and enable_video_similarity
                     and shared_media_type == "videos"
                     and profile
                     and profile.get("enable_fuzzy", False)
                 ):
                     try:
-                        fp1 = video_fingerprinter.compute_video_fingerprint(file1, num_keyframes=5)
-                        fp2 = video_fingerprinter.compute_video_fingerprint(file2, num_keyframes=5)
+                        fp1 = video_fp_cache.get(file1)
+                        fp2 = video_fp_cache.get(file2)
                         
                         if fp1 and fp2:
                             is_sim, similarity, details = video_fingerprinter.are_videos_similar(
@@ -1804,57 +1911,65 @@ class EnhancedScanThread(QThread):
                 elif (
                     ext1 in audio_extensions
                     and ext2 in audio_extensions
-                    and HAS_AUDIO_FINGERPRINTER
+                    and enable_audio_similarity
                     and shared_media_type == "audio"
                     and profile
                     and profile.get("enable_fuzzy", False)
                 ):
                     try:
-                        fp1 = audio_fingerprinter.compute_fingerprint(file1, method="hybrid")
-                        fp2 = audio_fingerprinter.compute_fingerprint(file2, method="hybrid")
+                        fp1 = audio_fp_cache.get(file1)
+                        fp2 = audio_fp_cache.get(file2)
                         
                         if fp1 and fp2:
                             is_sim, similarity, details = audio_fingerprinter.compare_fingerprints(
                                 fp1, fp2, method="hybrid"
                             )
-                            if is_sim or similarity >= 0.75:
+                            # AS-2: Trust the engine's determination only — no secondary
+                            # low-score fallback.  is_sim=True requires chromaprint≥0.92,
+                            # MFCC≥0.90, or hybrid-combined≥0.88 after a 3%-duration gate.
+                            if is_sim:
                                 is_similar = True
                                 method = details.get('method_used', 'hybrid')
                                 similarity_reasons.append(f"Similar audio ({similarity:.0%} via {method})")
                     except Exception:
                         pass  # Fall through to other comparison methods
                 
-                # Check various similarity criteria
-                if settings.get('compare_by_name', False):
-                    name_similar = FileComparator.compare_by_name(file1, file2, settings.get('name_similarity', 0.8))
-                    if name_similar:
-                        is_similar = True
-                        similarity_reasons.append("Similar names")
-                
-                if settings.get('compare_by_size', False):
-                    size_similar = FileComparator.compare_by_size(file1, file2, settings.get('size_tolerance', 1))
-                    if size_similar:
-                        is_similar = True
-                        similarity_reasons.append("Similar sizes")
+                # Check various similarity criteria.
+                # AS-2: Skip all name/size/text comparisons for audio pairs — those
+                # signals are too noisy for music libraries (same song title ≠ same
+                # recording; different bitrate ≠ different song).  Only the acoustic
+                # fingerprint (above) is authoritative for audio.
+                if shared_media_type != "audio":
+                    if settings.get('compare_by_name', False):
+                        name_similar = FileComparator.compare_by_name(file1, file2, settings.get('name_similarity', 0.8))
+                        if name_similar:
+                            is_similar = True
+                            similarity_reasons.append("Similar names")
 
-                # Same name but different size (explicit step)
-                if name_similar and not size_similar:
-                    try:
-                        name1 = os.path.splitext(os.path.basename(file1))[0].lower()
-                        name2 = os.path.splitext(os.path.basename(file2))[0].lower()
-                        if name1 == name2:
-                            size1 = os.path.getsize(file1)
-                            size2 = os.path.getsize(file2)
-                            if size1 != size2:
-                                is_similar = True
-                                similarity_reasons.append("Same name, different size")
-                    except Exception:
-                        pass
-                
-                if settings.get('compare_text_content', False):
-                    if FileComparator.compare_text_similarity(file1, file2, settings.get('content_similarity', 0.9)):
-                        is_similar = True
-                        similarity_reasons.append("Similar content")
+                    if settings.get('compare_by_size', False):
+                        size_similar = FileComparator.compare_by_size(file1, file2, settings.get('size_tolerance', 1))
+                        if size_similar:
+                            is_similar = True
+                            similarity_reasons.append("Similar sizes")
+
+                    # Same name but different size (explicit step)
+                    if name_similar and not size_similar:
+                        try:
+                            name1 = os.path.splitext(os.path.basename(file1))[0].lower()
+                            name2 = os.path.splitext(os.path.basename(file2))[0].lower()
+                            if name1 == name2:
+                                size1 = os.path.getsize(file1)
+                                size2 = os.path.getsize(file2)
+                                if size1 != size2:
+                                    is_similar = True
+                                    similarity_reasons.append("Same name, different size")
+                        except Exception:
+                            pass
+
+                    if settings.get('compare_text_content', False):
+                        if FileComparator.compare_text_similarity(file1, file2, settings.get('content_similarity', 0.9)):
+                            is_similar = True
+                            similarity_reasons.append("Similar content")
                 
                 if is_similar:
                     match_type = "name_size"
@@ -4109,33 +4224,38 @@ class EnhancedDuplicateFinder(QMainWindow):
         except Exception:
             return 0
     
-    def _suggest_file_to_keep(self, files):
+    def _suggest_file_to_keep(self, files, quick=False):
         """
         Suggest which file to keep from a group of duplicates.
-        
+
         Scoring criteria (higher = keep):
         - Higher quality score (resolution/bitrate when available)
         - Larger file size
         - Older file (original)
+
+        quick=True skips _get_quality_score() (which triggers audio/image/video I/O)
+        and ranks by size + age only.  Use this during tree population; the full score
+        is available when the user actually selects the group (NR-2).
         """
         if not files:
             return None
-        
+
         scored_files = []
         for f in files:
             if not os.path.exists(f):
                 continue
             try:
                 stat = os.stat(f)
-                quality = self._get_quality_score(f)
+                # NR-2: skip heavy I/O in quick mode; use 0.0 as quality placeholder
+                quality = 0.0 if quick else self._get_quality_score(f)
                 size = stat.st_size
                 scored_files.append((quality, size, -stat.st_mtime, f))
             except Exception:
                 continue
-        
+
         if not scored_files:
             return files[0] if files else None
-        
+
         # Return file with highest quality, then size, then oldest
         scored_files.sort(reverse=True)
         return scored_files[0][3]
@@ -4143,89 +4263,121 @@ class EnhancedDuplicateFinder(QMainWindow):
     def populate_duplicate_groups(self):
         """Populate the duplicate groups tree with sorting and filtering"""
         self.groups_tree.clear()
-        
+
         # Get current sort option
         sort_option = self.sort_combo.currentText() if hasattr(self, 'sort_combo') else "Size (Largest First)"
-        
+
         # Get current file type filter
         file_type_filter = self.file_type_filter.currentText() if hasattr(self, 'file_type_filter') else "All Types"
-        
+
         # Convert to list, filter, and sort
         groups_list = []
         for hash_val, files in self.duplicates.items():
             if self._passes_file_type_filter(files, file_type_filter):
                 groups_list.append((hash_val, files))
-        
+
         groups_list.sort(key=lambda x: self._get_group_sort_key(x[0], x[1], sort_option))
-        
-        for i, (hash_val, files) in enumerate(groups_list):
-            group_item = QTreeWidgetItem()
-            
-            # Get file type category for display
-            file_type = self._get_file_type_category(files[0]) if files else "Unknown"
-            group_item.setText(0, f"📁 Group {i+1} ({file_type})")
-            group_item.setText(1, str(len(files)))
-            
-            # Calculate total size
-            total_size = 0
-            for file_path in files:
-                try:
-                    total_size += os.path.getsize(file_path)
-                except Exception:
-                    pass
-            
-            group_item.setText(2, self.format_file_size(total_size))
-            group_item.setData(0, Qt.ItemDataRole.UserRole, hash_val)
-            
-            # Store suggested keep file + tooltip
-            suggested = self._suggest_file_to_keep(files)
-            group_item.setData(1, Qt.ItemDataRole.UserRole, suggested)
-            if suggested:
-                qinfo = self._get_quality_info(suggested)
-                tooltip = f"Keep: {os.path.basename(suggested)} | {qinfo.get('category','other').capitalize()} | {qinfo.get('details','N/A')}"
-                group_item.setToolTip(0, tooltip)
-            
-            self.groups_tree.addTopLevelItem(group_item)
-        
-        # Update status with filter info
+
+        # NR-3: Populate in batches so the event loop can breathe between chunks.
+        # Each batch of 100 items is inserted with repaints disabled (NR-1) then the
+        # next batch is scheduled via QTimer.singleShot(0) — fired when the event loop
+        # is idle — so buttons stay responsive while the tree fills.
+        self._populate_dup_batch(groups_list, 0)
+
+        # Status update is independent of the tree fill, so do it immediately
         total_groups = len(self.duplicates)
         shown_groups = len(groups_list)
         if file_type_filter != "All Types":
             self.status_bar.showMessage(
-                f"📊 Showing {shown_groups} of {total_groups} groups (filtered by {file_type_filter})", 
+                f"📊 Showing {shown_groups} of {total_groups} groups (filtered by {file_type_filter})",
                 3000
             )
-    
+
+    def _populate_dup_batch(self, groups_list, start, batch_size=100):
+        """Insert one batch of duplicate-group rows, then schedule the next (NR-3)."""
+        end = min(start + batch_size, len(groups_list))
+        self.groups_tree.setUpdatesEnabled(False)
+        try:
+            for i in range(start, end):
+                hash_val, files = groups_list[i]
+                group_item = QTreeWidgetItem()
+
+                file_type = self._get_file_type_category(files[0]) if files else "Unknown"
+                group_item.setText(0, f"📁 Group {i+1} ({file_type})")
+                group_item.setText(1, str(len(files)))
+
+                # Calculate total size (stat-only, no audio decode)
+                total_size = 0
+                for file_path in files:
+                    try:
+                        total_size += os.path.getsize(file_path)
+                    except Exception:
+                        pass
+
+                group_item.setText(2, self.format_file_size(total_size))
+                group_item.setData(0, Qt.ItemDataRole.UserRole, hash_val)
+
+                # NR-2: quick=True skips _get_quality_score() I/O during population;
+                # full quality score is computed lazily when the user selects the group.
+                suggested = self._suggest_file_to_keep(files, quick=True)
+                group_item.setData(1, Qt.ItemDataRole.UserRole, suggested)
+                if suggested:
+                    group_item.setToolTip(0, f"Keep: {os.path.basename(suggested)}")
+
+                self.groups_tree.addTopLevelItem(group_item)
+        finally:
+            self.groups_tree.setUpdatesEnabled(True)
+
+        if end < len(groups_list):
+            QTimer.singleShot(0, lambda s=end: self._populate_dup_batch(groups_list, s))
+
     def populate_similar_groups(self):
         """Populate the similar files groups tree"""
         self.similar_groups_tree.clear()
-        
+
+        # NR-3: Pre-filter into a flat list so we can slice by index for batching
+        items_list = []
         for i, (key, group_data) in enumerate(self.similar_files.items()):
             if self.similar_step_filter:
                 match_type = group_data.get("match_type")
                 if match_type not in self.similar_step_filter:
                     continue
-            group_item = QTreeWidgetItem()
-            match_type = group_data.get("match_type", "")
-            if match_type == "content":
-                label = "Content Group"
-            elif match_type == "same_name_diff_size":
-                label = "Same Name ≠ Size"
-            elif match_type == "name_size":
-                label = "Name/Size Group"
-            else:
-                label = "Similar Group"
-            group_item.setText(0, f"{label} {i+1}")
-            group_item.setText(1, ", ".join(group_data.get('reasons', [])))
-            group_item.setText(2, str(len(group_data.get('files', []))))
-            group_item.setData(0, Qt.ItemDataRole.UserRole, key)
-            suggested = self._suggest_file_to_keep(group_data.get("files", []))
-            if suggested:
-                qinfo = self._get_quality_info(suggested)
-                tooltip = f"Keep: {os.path.basename(suggested)} | {qinfo.get('category','other').capitalize()} | {qinfo.get('details','N/A')}"
-                group_item.setToolTip(0, tooltip)
-            
-            self.similar_groups_tree.addTopLevelItem(group_item)
+            items_list.append((i, key, group_data))
+
+        self._populate_sim_batch(items_list, 0)
+
+    def _populate_sim_batch(self, items_list, start, batch_size=100):
+        """Insert one batch of similar-group rows, then schedule the next (NR-3)."""
+        end = min(start + batch_size, len(items_list))
+        self.similar_groups_tree.setUpdatesEnabled(False)
+        try:
+            for idx in range(start, end):
+                orig_i, key, group_data = items_list[idx]
+                group_item = QTreeWidgetItem()
+                match_type = group_data.get("match_type", "")
+                if match_type == "content":
+                    label = "Content Group"
+                elif match_type == "same_name_diff_size":
+                    label = "Same Name ≠ Size"
+                elif match_type == "name_size":
+                    label = "Name/Size Group"
+                else:
+                    label = "Similar Group"
+                group_item.setText(0, f"{label} {orig_i+1}")
+                group_item.setText(1, ", ".join(group_data.get('reasons', [])))
+                group_item.setText(2, str(len(group_data.get('files', []))))
+                group_item.setData(0, Qt.ItemDataRole.UserRole, key)
+                # NR-2: quick=True; quality details computed lazily on selection
+                suggested = self._suggest_file_to_keep(group_data.get("files", []), quick=True)
+                if suggested:
+                    group_item.setToolTip(0, f"Keep: {os.path.basename(suggested)}")
+
+                self.similar_groups_tree.addTopLevelItem(group_item)
+        finally:
+            self.similar_groups_tree.setUpdatesEnabled(True)
+
+        if end < len(items_list):
+            QTimer.singleShot(0, lambda s=end: self._populate_sim_batch(items_list, s))
     
     def show_duplicate_group_files(self, current, previous):
         """Show files in selected duplicate group with sorting and keep suggestions"""
@@ -5002,7 +5154,9 @@ class EnhancedDuplicateFinder(QMainWindow):
 
     def _start_bulk_move_duplicates(self, files_to_move, preview_dialog):
         """Start bulk move operation with progress dialog."""
-        preview_dialog.accept()
+        # MV-1: preview_dialog may be None when called from move_selected_files
+        if preview_dialog is not None:
+            preview_dialog.accept()
 
         progress_dialog = QDialog(self)
         progress_dialog.setWindowTitle("🚀 Bulk Move Duplicates")
@@ -5391,65 +5545,27 @@ class EnhancedDuplicateFinder(QMainWindow):
         if not self.move_destination:
             QMessageBox.warning(self, "Warning", "Please select a move destination first")
             return
-        
+
         selected_files = self.get_selected_files()
-        
+
         if not selected_files:
             QMessageBox.warning(self, "Warning", "No files selected for moving")
             return
-        
+
         reply = QMessageBox.question(
-            self, 
+            self,
             "Confirm Move",
             f"Move {len(selected_files)} selected files to:\n{self.move_destination}?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        
+
         if reply == QMessageBox.StandardButton.Yes:
-            moved_count = 0
-            failed_files = []
-            
-            # Create destination directory if it doesn't exist
+            # MV-1: Delegate to the background-threaded infrastructure instead of
+            # looping with shutil.move() on the main thread (caused "Not Responding").
+            # _start_bulk_move_duplicates handles progress dialog, undo recording,
+            # and calls refresh_current_view() via _handle_bulk_move_results().
             os.makedirs(self.move_destination, exist_ok=True)
-            
-            for file_path in selected_files:
-                try:
-                    filename = os.path.basename(file_path)
-                    dest_path = os.path.join(self.move_destination, filename)
-                    
-                    # Handle filename conflicts
-                    counter = 1
-                    base_name, ext = os.path.splitext(filename)
-                    while os.path.exists(dest_path):
-                        new_filename = f"{base_name}_{counter}{ext}"
-                        dest_path = os.path.join(self.move_destination, new_filename)
-                        counter += 1
-                    
-                    shutil.move(file_path, dest_path)
-                    moved_count += 1
-                    
-                except Exception as e:
-                    failed_files.append(f"{file_path}: {e}")
-            
-            # Show results
-            if moved_count > 0:
-                QMessageBox.information(
-                    self, 
-                    "Move Complete", 
-                    f"✅ Successfully moved {moved_count} files to:\n{self.move_destination}"
-                )
-            
-            if failed_files:
-                QMessageBox.warning(
-                    self,
-                    "Some Moves Failed",
-                    f"❌ Failed to move {len(failed_files)} files:\n\n" + 
-                    "\n".join(failed_files[:5]) +
-                    (f"\n... and {len(failed_files)-5} more" if len(failed_files) > 5 else "")
-                )
-            
-            # Refresh the view
-            self.refresh_current_view()
+            self._start_bulk_move_duplicates(selected_files, preview_dialog=None)
     
     def refresh_current_view(self):
         """Refresh the current view after file operations"""
