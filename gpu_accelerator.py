@@ -2184,8 +2184,13 @@ def get_semantic_model():
         if HAS_CUDA and BACKEND == 'torch' and torch is not None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         elif HAS_CUDA and BACKEND == 'cupy':
-            # CuPy available means CUDA is available, use it
-            device = "cuda"
+            # CuPy has CUDA, but SentenceTransformer uses PyTorch internally.
+            # This PyTorch install may be CPU-only even when CuPy has GPU access,
+            # so always verify torch.cuda.is_available() before requesting cuda.
+            if torch is not None and torch.cuda.is_available():
+                device = "cuda"
+            else:
+                device = "cpu"
         else:
             device = "cpu"
         

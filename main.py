@@ -611,6 +611,11 @@ QMenu::item:selected {
 
 class FileComparator:
     """Advanced file comparison utility"""
+
+    @staticmethod
+    def normalized_name(value):
+        """Lowercase alphanumeric filename key for fast similarity checks."""
+        return "".join(ch for ch in value.lower() if ch.isalnum())
     
     @staticmethod
     def compare_by_name(file1, file2, similarity_threshold=0.8):
@@ -649,46 +654,50 @@ class FileComparator:
     @staticmethod
     def compare_text_similarity(file1, file2, similarity_threshold=0.9, use_semantic=True):
         """Compare text files by content similarity.
-        
+
         Uses GPU-accelerated semantic similarity if available, with fallback
         to SequenceMatcher for syntactic comparison.
-        
-        Args:
-            file1: First file path.
-            file2: Second file path.
-            similarity_threshold: Minimum similarity (0.0 to 1.0).
-            use_semantic: Whether to use semantic similarity (GPU-accelerated).
-            
+
         Returns:
             True if files are similar above threshold.
         """
         try:
             ext1 = os.path.splitext(file1)[1].lower()
             ext2 = os.path.splitext(file2)[1].lower()
-            
-            text_extensions = ['.txt', '.py', '.js', '.html', '.css', '.md', '.json', '.xml', '.csv', '.log', '.yaml', '.yml', '.ts', '.jsx', '.tsx']
-            
-            if ext1 in text_extensions and ext2 in text_extensions:
+
+            text_extensions = {'.txt', '.py', '.js', '.html', '.css', '.md', '.json',
+                               '.xml', '.csv', '.log', '.yaml', '.yml', '.ts', '.jsx', '.tsx'}
+
+            if ext1 not in text_extensions or ext2 not in text_extensions:
+                return False
+
+            # ROOT-CAUSE fix: read at most max_chars characters so that
+            # SequenceMatcher's O(n×m) cost stays bounded. Previously this read
+            # the entire file — a Flutter pubspec.lock or large JSON file can be
+            # hundreds of KB, making SequenceMatcher take minutes per pair.
+            max_chars = 50_000
+            try:
                 with open(file1, 'r', encoding='utf-8', errors='ignore') as f1:
-                    with open(file2, 'r', encoding='utf-8', errors='ignore') as f2:
-                        content1 = f1.read()
-                        content2 = f2.read()
-                        
-                        # Skip very large files for semantic comparison
-                        max_semantic_chars = 50000
-                        
-                        # Try GPU-accelerated semantic similarity first
-                        if use_semantic and HAS_SEMANTIC_SIMILARITY and semantic_engine is not None:
-                            if len(content1) <= max_semantic_chars and len(content2) <= max_semantic_chars:
-                                try:
-                                    similarity = semantic_engine.compare(content1, content2)
-                                    return similarity >= similarity_threshold
-                                except Exception:
-                                    pass  # Fall through to syntactic comparison
-                        
-                        # Fallback to syntactic comparison (SequenceMatcher)
-                        ratio = SequenceMatcher(None, content1, content2).ratio()
-                        return ratio >= similarity_threshold
+                    content1 = f1.read(max_chars)
+                with open(file2, 'r', encoding='utf-8', errors='ignore') as f2:
+                    content2 = f2.read(max_chars)
+            except Exception:
+                return False
+
+            if not content1 or not content2:
+                return False
+
+            # Try GPU-accelerated semantic similarity first
+            if use_semantic and HAS_SEMANTIC_SIMILARITY and semantic_engine is not None:
+                try:
+                    similarity = semantic_engine.compare(content1, content2)
+                    return similarity >= similarity_threshold
+                except Exception:
+                    pass  # Fall through to syntactic comparison
+
+            # Syntactic comparison — bounded by max_chars, so reliably fast
+            ratio = SequenceMatcher(None, content1, content2).ratio()
+            return ratio >= similarity_threshold
         except Exception:
             pass
         return False
@@ -1741,17 +1750,33 @@ class EnhancedScanThread(QThread):
     def find_similar_files(self, files, duplicates):
         """Find similar (but not identical) files"""
         similar_files = defaultdict(list)
-        
+
         # Get list of files that are not already exact duplicates
         duplicate_files = set()
         for file_list in duplicates.values():
             duplicate_files.update(file_list)
-        
+
         non_duplicate_files = [f for f in files if f not in duplicate_files]
-        
+
         settings = self.comparison_settings
         hash_type = settings.get('hash_type', 'MD5')
         total_comparisons = len(non_duplicate_files) * (len(non_duplicate_files) - 1) // 2
+        phase2_started_at = time.time()
+
+        # FIX-B: With N files the pairwise loop is O(n²). For large directories
+        # (e.g. 42K files → ~895M pairs) this runs indefinitely and makes the UI
+        # appear frozen. Cap at 1M pairs and warn the user so Phase 2 always
+        # completes in a reasonable time. The exact-duplicate phase (Phase 1) is
+        # unaffected — all true duplicates are already found via hashing.
+        _MAX_PAIRS = 1_000_000
+        if total_comparisons > _MAX_PAIRS:
+            self.status_update.emit(
+                f"⚠ Similarity: {len(non_duplicate_files):,} files → "
+                f"{total_comparisons:,} pairs exceeds limit. "
+                f"Checking first {_MAX_PAIRS:,} pairs only. "
+                "Disable 'Find Similar' for full-directory scans."
+            )
+            total_comparisons = _MAX_PAIRS
         comparison_count = 0
 
         # Define extension sets once outside the O(n²) loop (M-5 fix)
@@ -1822,6 +1847,18 @@ class EnhancedScanThread(QThread):
         ext_cache = {f: os.path.splitext(f)[1].lower() for f in non_duplicate_files}
         media_type_cache = {f: get_media_type(f) for f in non_duplicate_files}
         profile_cache = {f: get_profile_for_path(f, self.media_profiles) for f in non_duplicate_files}
+        basename_cache = {f: os.path.basename(f).lower() for f in non_duplicate_files}
+        stem_cache = {f: os.path.splitext(basename_cache[f])[0] for f in non_duplicate_files}
+        normalized_name_cache = {f: FileComparator.normalized_name(stem_cache[f]) for f in non_duplicate_files}
+        size_cache = {}
+        for f in non_duplicate_files:
+            try:
+                size_cache[f] = os.path.getsize(f)
+            except OSError:
+                size_cache[f] = None
+
+        self.files_processed.emit(0, total_comparisons)
+        self.eta_update.emit("Similarity ETA: calculating...")
 
         for i, file1 in enumerate(non_duplicate_files):
             if self._pause_or_cancel_requested():
@@ -1831,10 +1868,22 @@ class EnhancedScanThread(QThread):
             ext1 = ext_cache[file1]
             media_type1 = media_type_cache[file1]
             profile1 = profile_cache[file1]
+            basename1 = basename_cache[file1]
+            stem1 = stem_cache[file1]
+            normalized1 = normalized_name_cache[file1]
+            size1 = size_cache[file1]
             for j, file2 in enumerate(non_duplicate_files[i+1:], i+1):
                 if self._pause_or_cancel_requested():
                     return dict(similar_files)
                 comparison_count += 1
+
+                # FIX-B: hard cap — stop once we've checked enough pairs
+                if comparison_count >= _MAX_PAIRS:
+                    self.status_update.emit(
+                        f"Similarity scan: {_MAX_PAIRS:,} pair limit reached."
+                    )
+                    self.progress.emit(95)
+                    return dict(similar_files)
 
                 # Update progress (second 50%)
                 if comparison_count % 100 == 0:
@@ -1843,6 +1892,16 @@ class EnhancedScanThread(QThread):
                     else:
                         progress = 95
                     self.progress.emit(min(progress, 95))
+                if comparison_count % 5000 == 0 or comparison_count == 1:
+                    self.files_processed.emit(comparison_count, total_comparisons)
+                    elapsed = max(time.time() - phase2_started_at, 0.001)
+                    rate = comparison_count / elapsed
+                    remaining = max(total_comparisons - comparison_count, 0)
+                    eta_seconds = int(remaining / rate) if rate > 0 else 0
+                    self.status_update.emit(
+                        f"Finding similar files... checked {comparison_count:,}/{total_comparisons:,} pairs"
+                    )
+                    self.eta_update.emit(f"Similarity ETA: {timedelta(seconds=eta_seconds)}")
 
                 is_similar = False
                 similarity_reasons = []
@@ -1853,6 +1912,10 @@ class EnhancedScanThread(QThread):
                 profile = profile1 if shared_media_type else None
                 # ext1 is pre-fetched in the outer loop (constant for all j)
                 ext2 = ext_cache[file2]
+                basename2 = basename_cache[file2]
+                stem2 = stem_cache[file2]
+                normalized2 = normalized_name_cache[file2]
+                size2 = size_cache[file2]
 
                 if shared_media_type and profile and profile.get("enable_fuzzy", False):
                     if shared_media_type == "images":
@@ -1941,13 +2004,22 @@ class EnhancedScanThread(QThread):
                 # fingerprint (above) is authoritative for audio.
                 if shared_media_type != "audio":
                     if settings.get('compare_by_name', False):
-                        name_similar = FileComparator.compare_by_name(file1, file2, settings.get('name_similarity', 0.8))
+                        name_threshold = settings.get('name_similarity', 0.8)
+                        matcher = SequenceMatcher(None, basename1, basename2)
+                        if (
+                            matcher.real_quick_ratio() >= name_threshold
+                            and matcher.quick_ratio() >= name_threshold
+                            and matcher.ratio() >= name_threshold
+                        ):
+                            name_similar = True
                         if name_similar:
                             is_similar = True
                             similarity_reasons.append("Similar names")
 
                     if settings.get('compare_by_size', False):
-                        size_similar = FileComparator.compare_by_size(file1, file2, settings.get('size_tolerance', 1))
+                        tolerance_bytes = settings.get('size_tolerance', 1) * 1024 * 1024
+                        if size1 is not None and size2 is not None:
+                            size_similar = abs(size1 - size2) <= tolerance_bytes
                         if size_similar:
                             is_similar = True
                             similarity_reasons.append("Similar sizes")
@@ -1955,12 +2027,8 @@ class EnhancedScanThread(QThread):
                     # Same name but different size (explicit step)
                     if name_similar and not size_similar:
                         try:
-                            name1 = os.path.splitext(os.path.basename(file1))[0].lower()
-                            name2 = os.path.splitext(os.path.basename(file2))[0].lower()
-                            if name1 == name2:
-                                size1 = os.path.getsize(file1)
-                                size2 = os.path.getsize(file2)
-                                if size1 != size2:
+                            if stem1 == stem2 or (normalized1 and normalized1 == normalized2):
+                                if size1 is not None and size2 is not None and size1 != size2:
                                     is_similar = True
                                     similarity_reasons.append("Same name, different size")
                         except Exception:
@@ -1986,7 +2054,8 @@ class EnhancedScanThread(QThread):
                         'reasons': similarity_reasons,
                         'match_type': match_type
                     }
-        
+        self.files_processed.emit(total_comparisons, total_comparisons)
+        self.eta_update.emit("Similarity ETA: 0:00:00")
         return dict(similar_files)
 
 
@@ -2331,6 +2400,152 @@ class BulkMoveThread(QThread):
         })
 
 
+class BulkDeleteThread(QThread):
+    """Run file deletion / recycle-bin moves on a worker thread (UI-2).
+
+    Eliminates the 'Not Responding' freeze that occurred when os.remove(),
+    send2trash(), or shutil.copy2() (undo backup) were called in a tight loop
+    on the main thread.
+    """
+    progress = pyqtSignal(int, int)   # done, total
+    status   = pyqtSignal(str)
+    result   = pyqtSignal(dict)
+
+    def __init__(self, files_to_delete, use_recycle=False,
+                 undo_manager=None, undo_enabled=True):
+        super().__init__()
+        self.files_to_delete = files_to_delete or []
+        self.use_recycle     = use_recycle
+        self.undo_manager    = undo_manager
+        self.undo_enabled    = undo_enabled
+        self._cancelled      = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        total    = len(self.files_to_delete)
+        deleted  = []
+        failed   = []
+        backed_up = 0
+        verb     = "Recycling" if self.use_recycle else "Deleting"
+
+        for idx, file_path in enumerate(self.files_to_delete, 1):
+            if self._cancelled:
+                break
+
+            self.progress.emit(idx, total)
+            self.status.emit(f"{verb} {os.path.basename(file_path)} ({idx}/{total})")
+
+            try:
+                # Backup before permanent delete so undo stays possible
+                if self.undo_enabled and self.undo_manager and not self.use_recycle:
+                    if self.undo_manager.backup_file(file_path):
+                        backed_up += 1
+
+                if not os.path.exists(file_path):
+                    continue   # already gone — don't count as error
+
+                # Build path variants (Windows long-path prefix handling)
+                normalized = (file_path.replace("\\\\?\\", "")
+                              if file_path.startswith("\\\\?\\") else file_path)
+                prefixed = (file_path if file_path.startswith("\\\\?\\")
+                            else f"\\\\?\\{os.path.abspath(file_path)}")
+                paths = ([normalized, prefixed] if self.use_recycle
+                         else [prefixed, normalized])
+                if normalized == prefixed:
+                    paths = [normalized]
+
+                success  = False
+                last_err = None
+                for path in paths:
+                    try:
+                        if self.use_recycle and HAS_SEND2TRASH:
+                            fn = (send2trash_func
+                                  if 'send2trash_func' in globals() and send2trash_func
+                                  else send2trash)
+                            fn(path)
+                        else:
+                            os.chmod(path, 0o777)
+                            os.remove(path)
+                        success = True
+                        break
+                    except Exception as e:
+                        last_err = e
+
+                if success:
+                    deleted.append(file_path)
+                elif last_err:
+                    raise last_err
+
+            except Exception as e:
+                failed.append(f"{os.path.basename(file_path)}: {e}")
+
+        self.result.emit({
+            "deleted":    deleted,
+            "backed_up":  backed_up,
+            "failed":     failed,
+            "cancelled":  self._cancelled,
+            "use_recycle": self.use_recycle,
+        })
+
+
+class ExportThread(QThread):
+    """Run file-export work on a worker thread (UI-4).
+
+    os.path.getsize() called for every result file plus physical file-write
+    were blocking the main thread during JSON/CSV/HTML export.
+    """
+    finished = pyqtSignal(bool, str)   # success, message
+
+    def __init__(self, fn):
+        super().__init__()
+        self._fn = fn
+
+    def run(self):
+        try:
+            msg = self._fn()
+            self.finished.emit(True, msg or "Export complete.")
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+
+class GroupQualityThread(QThread):
+    """Load _get_quality_info() for each file in a group off the main thread (UI-5).
+
+    Emits one quality_ready signal per file so the detail tree can be rendered
+    instantly from os.stat() data and populated with quality scores incrementally
+    rather than blocking the event loop while audio/image metadata is decoded.
+    """
+    quality_ready = pyqtSignal(str, str, str, float)  # path, category, details, score
+    all_done      = pyqtSignal()
+
+    def __init__(self, files, get_quality_fn):
+        super().__init__()
+        self._files         = list(files)
+        self._get_quality   = get_quality_fn
+        self._cancelled     = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        for file_path in self._files:
+            if self._cancelled:
+                break
+            try:
+                info = self._get_quality(file_path)
+                self.quality_ready.emit(
+                    file_path,
+                    info.get("category", "other"),
+                    info.get("details", "N/A"),
+                    float(info.get("score", 0.0)),
+                )
+            except Exception:
+                self.quality_ready.emit(file_path, "other", "N/A", 0.0)
+        self.all_done.emit()
+
+
 class NoWheelChangeFilter(QObject):
     """Prevent mouse-wheel scrolling from changing form values."""
 
@@ -2349,6 +2564,10 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.move_destination = None
         self.scan_filters = ScanFilters()
         self.scan_thread = None
+        self._quality_thread = None
+        self._active_move_thread = None
+        self._active_delete_thread = None
+        self._active_export_thread = None
         self.scan_start_time = None
         self.audio_quality_analyzer = AudioQualityAnalyzer()
         self.audio_extensions = {'.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.m4a', '.opus', '.aiff', '.ape', '.alac', '.wv'}
@@ -4383,131 +4602,48 @@ class EnhancedDuplicateFinder(QMainWindow):
         """Show files in selected duplicate group with sorting and keep suggestions"""
         if current is None:
             return
-            
+
+        # UI-5: cancel any in-flight quality thread from a previous group click
+        if hasattr(self, '_quality_thread') and self._quality_thread is not None:
+            self._quality_thread.cancel()
+            self._quality_thread.quit()
+            self._quality_thread = None
+
         hash_val = current.data(0, Qt.ItemDataRole.UserRole)
-        suggested_keep = current.data(1, Qt.ItemDataRole.UserRole)
         files = self.duplicates.get(hash_val, [])
-        suggested_keep = self._suggest_file_to_keep(files)
-        
+        # NR-2: quick=True avoids audio/image I/O during suggestion
+        suggested_keep = self._suggest_file_to_keep(files, quick=True)
+
         self.duplicate_files_tree.clear()
-        
-        # Build file info list for sorting
+
+        # Build file info list using only os.stat() — no quality I/O here (UI-5)
         file_infos = []
         for file_path in files:
             try:
                 stat = os.stat(file_path)
-                quality_info = self._get_quality_info(file_path)
                 file_infos.append({
                     'path': file_path,
                     'name': os.path.basename(file_path),
                     'size': stat.st_size,
                     'mtime': stat.st_mtime,
                     'is_suggested': file_path == suggested_keep,
-                    'type': quality_info.get("category", "other"),
-                    'quality': quality_info.get("score", 0.0),
-                    'details': quality_info.get("details", "N/A")
                 })
             except Exception:
-                quality_info = self._get_quality_info(file_path)
-                file_infos.append({
-                    'path': file_path,
-                    'name': os.path.basename(file_path),
-                'size': 0,
-                'mtime': 0,
-                'is_suggested': file_path == suggested_keep,
-                'type': quality_info.get("category", "other"),
-                'quality': quality_info.get("score", 0.0),
-                'details': quality_info.get("details", "N/A")
-            })
-        
-        # Sort: suggested keep first, then by modification time (oldest first)
-        file_infos.sort(key=lambda x: (not x['is_suggested'], x['mtime']))
-        
-        for info in file_infos:
-            item = QTreeWidgetItem()
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            
-            # Don't check the suggested keep file by default
-            if info['is_suggested']:
-                item.setCheckState(0, Qt.CheckState.Unchecked)
-                item.setText(1, f"⭐ {info['name']}")
-                # Make suggested file stand out
-                font = item.font(1)
-                font.setBold(True)
-                item.setFont(1, font)
-            else:
-                item.setCheckState(0, Qt.CheckState.Checked)  # Pre-check duplicates for deletion
-                item.setText(1, info['name'])
-            
-            item.setText(2, info['path'])
-            item.setText(3, info['type'].capitalize())
-            item.setText(4, f"{info['quality']:.2f}")
-            item.setText(5, info['details'])
-            item.setText(6, self.format_file_size(info['size']))
-            
-            # Add modification date
-            if info['mtime'] > 0:
-                mod_date = datetime.fromtimestamp(info['mtime']).strftime('%Y-%m-%d %H:%M')
-                item.setText(7, mod_date)
-            else:
-                item.setText(7, "Unknown")
-            
-            item.setData(0, Qt.ItemDataRole.UserRole, info['path'])
-            self.duplicate_files_tree.addTopLevelItem(item)
-        
-        # Auto-resize columns
-        for i in range(self.duplicate_files_tree.columnCount()):
-            self.duplicate_files_tree.resizeColumnToContents(i)
-    
-    def show_similar_group_files(self, current, previous):
-        """Show files in selected similar group with sorting"""
-        if current is None:
-            return
-            
-        group_key = current.data(0, Qt.ItemDataRole.UserRole)
-        group_data = self.similar_files.get(group_key, {})
-        files = group_data.get('files', [])
-        suggested_keep = self._suggest_file_to_keep(files)
-        
-        self.similar_files_tree.clear()
-        
-        # Build file info list for sorting
-        file_infos = []
-        for file_path in files:
-            try:
-                stat = os.stat(file_path)
-                quality_info = self._get_quality_info(file_path)
-                file_infos.append({
-                    'path': file_path,
-                    'name': os.path.basename(file_path),
-                    'size': stat.st_size,
-                    'mtime': stat.st_mtime,
-                    'is_suggested': file_path == suggested_keep,
-                    'type': quality_info.get("category", "other"),
-                    'quality': quality_info.get("score", 0.0),
-                    'details': quality_info.get("details", "N/A")
-                })
-            except Exception:
-                quality_info = self._get_quality_info(file_path)
                 file_infos.append({
                     'path': file_path,
                     'name': os.path.basename(file_path),
                     'size': 0,
                     'mtime': 0,
                     'is_suggested': file_path == suggested_keep,
-                    'type': quality_info.get("category", "other"),
-                    'quality': quality_info.get("score", 0.0),
-                    'details': quality_info.get("details", "N/A")
                 })
-        
-        # Sort: suggested keep first, then by size
-        file_infos.sort(key=lambda x: (not x['is_suggested'], -x['size'], x['name'].lower()))
-        
+
+        # Sort: suggested keep first, then by modification time (oldest first)
+        file_infos.sort(key=lambda x: (not x['is_suggested'], x['mtime']))
+
         for info in file_infos:
             item = QTreeWidgetItem()
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            
-            # Suggested keep: don't pre-check, mark with ⭐
+
             if info['is_suggested']:
                 item.setCheckState(0, Qt.CheckState.Unchecked)
                 item.setText(1, f"⭐ {info['name']}")
@@ -4515,28 +4651,133 @@ class EnhancedDuplicateFinder(QMainWindow):
                 font.setBold(True)
                 item.setFont(1, font)
             else:
-                item.setCheckState(0, Qt.CheckState.Checked)  # Pre-check for deletion
+                item.setCheckState(0, Qt.CheckState.Checked)
                 item.setText(1, info['name'])
-            
+
             item.setText(2, info['path'])
-            item.setText(3, info['type'].capitalize())
-            item.setText(4, f"{info['quality']:.2f}")
-            item.setText(5, info['details'])
+            item.setText(3, "…")   # type     — filled by GroupQualityThread
+            item.setText(4, "…")   # quality  — filled by GroupQualityThread
+            item.setText(5, "…")   # details  — filled by GroupQualityThread
             item.setText(6, self.format_file_size(info['size']))
-            
-            # Add modification date
+
             if info['mtime'] > 0:
                 mod_date = datetime.fromtimestamp(info['mtime']).strftime('%Y-%m-%d %H:%M')
                 item.setText(7, mod_date)
             else:
                 item.setText(7, "Unknown")
-            
+
+            item.setData(0, Qt.ItemDataRole.UserRole, info['path'])
+            self.duplicate_files_tree.addTopLevelItem(item)
+
+        # Auto-resize columns with placeholder data first
+        for i in range(self.duplicate_files_tree.columnCount()):
+            self.duplicate_files_tree.resizeColumnToContents(i)
+
+        # UI-5: enrich quality columns incrementally from worker thread
+        def _apply_dup_quality(file_path, category, details, score):
+            tree = self.duplicate_files_tree
+            for idx in range(tree.topLevelItemCount()):
+                it = tree.topLevelItem(idx)
+                if it.data(0, Qt.ItemDataRole.UserRole) == file_path:
+                    it.setText(3, category.capitalize())
+                    it.setText(4, f"{score:.2f}")
+                    it.setText(5, details)
+                    break
+
+        self._quality_thread = GroupQualityThread(files, self._get_quality_info)
+        self._quality_thread.quality_ready.connect(_apply_dup_quality)
+        self._quality_thread.start()
+    
+    def show_similar_group_files(self, current, previous):
+        """Show files in selected similar group with sorting"""
+        if current is None:
+            return
+
+        # UI-5: cancel any in-flight quality thread from a previous group click
+        if hasattr(self, '_quality_thread') and self._quality_thread is not None:
+            self._quality_thread.cancel()
+            self._quality_thread.quit()
+            self._quality_thread = None
+
+        group_key = current.data(0, Qt.ItemDataRole.UserRole)
+        group_data = self.similar_files.get(group_key, {})
+        files = group_data.get('files', [])
+        # NR-2: quick=True avoids audio/image I/O during suggestion
+        suggested_keep = self._suggest_file_to_keep(files, quick=True)
+
+        self.similar_files_tree.clear()
+
+        # Build file info list using only os.stat() — no quality I/O here (UI-5)
+        file_infos = []
+        for file_path in files:
+            try:
+                stat = os.stat(file_path)
+                file_infos.append({
+                    'path': file_path,
+                    'name': os.path.basename(file_path),
+                    'size': stat.st_size,
+                    'mtime': stat.st_mtime,
+                    'is_suggested': file_path == suggested_keep,
+                })
+            except Exception:
+                file_infos.append({
+                    'path': file_path,
+                    'name': os.path.basename(file_path),
+                    'size': 0,
+                    'mtime': 0,
+                    'is_suggested': file_path == suggested_keep,
+                })
+
+        # Sort: suggested keep first, then by size
+        file_infos.sort(key=lambda x: (not x['is_suggested'], -x['size'], x['name'].lower()))
+
+        for info in file_infos:
+            item = QTreeWidgetItem()
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+
+            if info['is_suggested']:
+                item.setCheckState(0, Qt.CheckState.Unchecked)
+                item.setText(1, f"⭐ {info['name']}")
+                font = item.font(1)
+                font.setBold(True)
+                item.setFont(1, font)
+            else:
+                item.setCheckState(0, Qt.CheckState.Checked)
+                item.setText(1, info['name'])
+
+            item.setText(2, info['path'])
+            item.setText(3, "…")   # type     — filled by GroupQualityThread
+            item.setText(4, "…")   # quality  — filled by GroupQualityThread
+            item.setText(5, "…")   # details  — filled by GroupQualityThread
+            item.setText(6, self.format_file_size(info['size']))
+
+            if info['mtime'] > 0:
+                mod_date = datetime.fromtimestamp(info['mtime']).strftime('%Y-%m-%d %H:%M')
+                item.setText(7, mod_date)
+            else:
+                item.setText(7, "Unknown")
+
             item.setData(0, Qt.ItemDataRole.UserRole, info['path'])
             self.similar_files_tree.addTopLevelItem(item)
-        
-        # Auto-resize columns
+
+        # Auto-resize columns with placeholder data first
         for i in range(self.similar_files_tree.columnCount()):
             self.similar_files_tree.resizeColumnToContents(i)
+
+        # UI-5: enrich quality columns incrementally from worker thread
+        def _apply_sim_quality(file_path, category, details, score):
+            tree = self.similar_files_tree
+            for idx in range(tree.topLevelItemCount()):
+                it = tree.topLevelItem(idx)
+                if it.data(0, Qt.ItemDataRole.UserRole) == file_path:
+                    it.setText(3, category.capitalize())
+                    it.setText(4, f"{score:.2f}")
+                    it.setText(5, details)
+                    break
+
+        self._quality_thread = GroupQualityThread(files, self._get_quality_info)
+        self._quality_thread.quality_ready.connect(_apply_sim_quality)
+        self._quality_thread.start()
     
     def show_file_preview(self, current, previous):
         """Show file preview in preview area"""
@@ -4744,67 +4985,26 @@ class EnhancedDuplicateFinder(QMainWindow):
     def delete_selected_files(self):
         """Delete selected files with undo support"""
         selected_files = self.get_selected_files()
-        
+
         if not selected_files:
             QMessageBox.warning(self, "Warning", "No files selected for deletion")
             return
-        
-        # Check if undo is enabled
+
         undo_enabled = self.enterprise_config.get("enable_undo", True)
-        
         warning_text = f"Are you sure you want to delete {len(selected_files)} selected files?"
         if undo_enabled:
             warning_text += "\n\n✅ Undo is enabled - files will be backed up first."
         else:
             warning_text += "\n\n⚠️ This action cannot be undone!"
-        
+
         reply = QMessageBox.question(
-            self, 
-            "Confirm Delete",
-            warning_text,
+            self, "Confirm Delete", warning_text,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        
+
         if reply == QMessageBox.StandardButton.Yes:
-            deleted_count = 0
-            backed_up_count = 0
-            failed_files = []
-            
-            for file_path in selected_files:
-                try:
-                    # Backup file if undo is enabled
-                    if undo_enabled:
-                        if self.undo_manager.backup_file(file_path):
-                            backed_up_count += 1
-                    
-                    os.remove(file_path)
-                    deleted_count += 1
-                except Exception as e:
-                    failed_files.append(f"{file_path}: {e}")
-            
-            # Show results
-            if deleted_count > 0:
-                undo_msg = f"\n📦 {backed_up_count} files backed up for undo." if backed_up_count > 0 else ""
-                QMessageBox.information(
-                    self, 
-                    "Delete Complete", 
-                    f"✅ Successfully deleted {deleted_count} files.{undo_msg}"
-                )
-            
-            if failed_files:
-                QMessageBox.warning(
-                    self,
-                    "Some Deletions Failed",
-                    f"❌ Failed to delete {len(failed_files)} files:\n\n" + 
-                    "\n".join(failed_files[:5]) +  # Show first 5 errors
-                    (f"\n... and {len(failed_files)-5} more" if len(failed_files) > 5 else "")
-                )
-            
-            # Update undo state
-            self._update_undo_state()
-            
-            # Refresh the view
-            self.refresh_current_view()
+            # UI-2: delegate to background thread — never block the main thread
+            self._start_delete_operation(selected_files, use_recycle=False)
     
     def show_bulk_delete_preview(self):
         """Show preview dialog for bulk deleting all duplicates (keeps one per group)"""
@@ -4937,106 +5137,20 @@ class EnhancedDuplicateFinder(QMainWindow):
             "Are you absolutely sure?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        
+
         if reply != QMessageBox.StandardButton.Yes:
             return
-        
+
         dialog.accept()
-        
+
         # Clear previews and force GC to release file handles
         self.duplicate_preview_area.clear()
         self.similar_preview_area.clear()
         import gc
         gc.collect()
-        
-        deleted_count = 0
-        failed_files = []
-        
-        # Use undo manager if enabled
-        undo_enabled = self.enterprise_config.get("enable_undo", True)
-        backed_up_count = 0
-        
-        for file_path in files_to_delete:
-            try:
-                # Backup if undo is enabled
-                if undo_enabled and not use_recycle:
-                    if self.undo_manager.backup_file(file_path):
-                        backed_up_count += 1
-                
-                # Check if file exists before attempting deletion
-                # (Use the original path which likely has the prefix and is most reliable for existence check)
-                if not os.path.exists(file_path):
-                    continue
 
-                # Prepare path variants
-                # send2trash typically prefers standard paths (no prefix)
-                # os.remove for long paths REQUIRED the prefix
-                
-                normalized_path = file_path.replace("\\\\?\\", "") if file_path.startswith("\\\\?\\") else file_path
-                prefixed_path = file_path if file_path.startswith("\\\\?\\") else f"\\\\?\\{os.path.abspath(file_path)}"
-                
-                if use_recycle:
-                    # For Recycle Bin: Try normalized first, then prefixed
-                    paths_to_try = [normalized_path, prefixed_path]
-                    # Dedup if they are the same (short path)
-                    if normalized_path == prefixed_path:
-                        paths_to_try = [normalized_path]
-                else:
-                    # For Permanent Delete: Try prefixed first (better for long paths), then normalized
-                    paths_to_try = [prefixed_path, normalized_path]
-                    if normalized_path == prefixed_path:
-                        paths_to_try = [prefixed_path]
-
-                success = False
-                last_error = None
-                
-                for path_variant in paths_to_try:
-                    try:
-                        if use_recycle and HAS_SEND2TRASH:
-                            # Use function from dependencies if available, or direct import
-                            if 'send2trash_func' in globals() and send2trash_func:
-                                send2trash_func(path_variant)
-                            else:
-                                send2trash(path_variant)
-                        else:
-                            os.chmod(path_variant, 0o777)  # Try to remove read-only attribute
-                            os.remove(path_variant)
-                        
-                        success = True
-                        break
-                    except Exception as e:
-                        last_error = e
-                
-                if success:
-                    deleted_count += 1
-                elif last_error:
-                    # Reraise the last error to be caught by the outer try/except
-                    raise last_error
-                
-            except Exception as e:
-                failed_files.append(f"{os.path.basename(file_path)}: {e}")
-        
-        # Show results
-        result_msg = f"✅ Successfully {'recycled' if use_recycle else 'deleted'} {deleted_count} files."
-        if backed_up_count > 0:
-            result_msg += f"\n📦 {backed_up_count} files backed up for undo."
-        
-        QMessageBox.information(self, "Bulk Delete Complete", result_msg)
-        
-        if failed_files:
-            QMessageBox.warning(
-                self,
-                "Some Deletions Failed",
-                f"❌ Failed to delete {len(failed_files)} files:\n\n" +
-                "\n".join(failed_files[:10]) +
-                (f"\n... and {len(failed_files)-10} more" if len(failed_files) > 10 else "")
-            )
-        
-        # Update undo state
-        self._update_undo_state()
-        
-        # Refresh the view
-        self.refresh_current_view()
+        # UI-2: delegate to background thread so the main thread stays alive
+        self._start_delete_operation(files_to_delete, use_recycle=use_recycle)
 
     
     def show_bulk_move_preview(self):
@@ -5202,6 +5316,98 @@ class EnhancedDuplicateFinder(QMainWindow):
 
         thread.start()
         progress_dialog.exec()
+
+    # ------------------------------------------------------------------ #
+    #  UI-2: Background delete helpers                                     #
+    # ------------------------------------------------------------------ #
+
+    def _start_delete_operation(self, files_to_delete, use_recycle=False):
+        """Launch BulkDeleteThread with a progress dialog.
+
+        All three delete entry-points (delete_selected_files,
+        delete_to_recycle_bin, _execute_bulk_delete) delegate here so that
+        os.remove / send2trash / shutil.copy2 never run on the main thread.
+        """
+        undo_enabled = self.enterprise_config.get("enable_undo", True)
+
+        progress_dialog = QDialog(self)
+        verb = "Moving to Recycle Bin" if use_recycle else "Deleting"
+        progress_dialog.setWindowTitle(f"{verb}...")
+        progress_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress_dialog.resize(500, 160)
+        layout = QVBoxLayout(progress_dialog)
+
+        status_label = QLabel("Preparing…")
+        layout.addWidget(status_label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, len(files_to_delete))
+        layout.addWidget(progress_bar)
+
+        btn_row = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        thread = BulkDeleteThread(
+            files_to_delete,
+            use_recycle=use_recycle,
+            undo_manager=self.undo_manager,
+            undo_enabled=undo_enabled,
+        )
+        self._active_delete_thread = thread
+
+        def on_progress(done, total):
+            progress_bar.setValue(done)
+            progress_bar.setMaximum(total)
+
+        def on_status(text):
+            status_label.setText(text)
+
+        def on_cancel():
+            status_label.setText("Cancelling…")
+            cancel_btn.setEnabled(False)
+            thread.cancel()
+
+        def on_finished(result):
+            progress_dialog.accept()
+            self._handle_delete_results(result)
+
+        thread.progress.connect(on_progress)
+        thread.status.connect(on_status)
+        thread.result.connect(on_finished)
+        cancel_btn.clicked.connect(on_cancel)
+
+        thread.start()
+        progress_dialog.exec()
+
+    def _handle_delete_results(self, result):
+        """Show summary and refresh view after BulkDeleteThread finishes."""
+        deleted    = result.get("deleted", [])
+        backed_up  = result.get("backed_up", 0)
+        failed     = result.get("failed", [])
+        cancelled  = result.get("cancelled", False)
+        use_recycle = result.get("use_recycle", False)
+
+        if cancelled:
+            self.status_bar.showMessage("Delete cancelled.", 3000)
+
+        if deleted:
+            label    = "recycled" if use_recycle else "deleted"
+            undo_msg = (f"\n📦 {backed_up} files backed up for undo."
+                        if backed_up else "")
+            QMessageBox.information(
+                self, "Delete Complete",
+                f"✅ Successfully {label} {len(deleted)} files.{undo_msg}"
+            )
+
+        if failed:
+            self._show_error_dialog("Some Deletions Failed", failed)
+
+        self._update_undo_state()
+        # UI-3: pass exact removed files so _prune_result_sets skips stat calls
+        self.refresh_current_view(removed_files=deleted)
 
     def show_audio_move_preview(self):
         """Show preview dialog for audio smart move (keep best quality)."""
@@ -5467,7 +5673,9 @@ class EnhancedDuplicateFinder(QMainWindow):
         if failed_files:
             self._show_error_dialog("Some Moves Failed", failed_files)
 
-        self.refresh_current_view()
+        # UI-3: pass moved original paths so _prune_result_sets skips stat calls
+        moved_originals = [orig for orig, _ in moved_pairs]
+        self.refresh_current_view(removed_files=moved_originals if moved_originals else None)
 
     def _handle_audio_move_results(self, result, total_analyzed, total_kept, avg_improvement, kept_log, warnings):
         """Handle results of audio smart move operation."""
@@ -5502,7 +5710,8 @@ class EnhancedDuplicateFinder(QMainWindow):
         if kept_log:
             self._show_log_dialog("Audio Smart Move - Kept Files", kept_log)
 
-        self.refresh_current_view()
+        moved_originals = [orig for orig, _ in moved_pairs]
+        self.refresh_current_view(removed_files=moved_originals if moved_originals else None)
 
     def _show_error_dialog(self, title, errors):
         """Show a scrollable error dialog with details."""
@@ -5567,16 +5776,20 @@ class EnhancedDuplicateFinder(QMainWindow):
             os.makedirs(self.move_destination, exist_ok=True)
             self._start_bulk_move_duplicates(selected_files, preview_dialog=None)
     
-    def refresh_current_view(self):
-        """Refresh the current view after file operations"""
-        # Clear selections
+    def refresh_current_view(self, removed_files=None):
+        """Refresh the current view after file operations.
+
+        removed_files — optional list/set of paths that were just deleted or
+        moved.  When provided, _prune_result_sets uses a fast set-lookup path
+        instead of calling os.path.exists() for every tracked file (UI-3).
+        """
         self.clear_selection()
-        self._prune_result_sets()
-        
+        self._prune_result_sets(removed_files=removed_files)
+
         # Re-populate trees (files may have been moved/deleted)
         self.populate_duplicate_groups()
         self.populate_similar_groups()
-        
+
         # Clear file trees
         self.duplicate_files_tree.clear()
         self.similar_files_tree.clear()
@@ -5629,195 +5842,181 @@ class EnhancedDuplicateFinder(QMainWindow):
     def delete_to_recycle_bin(self):
         """Delete selected files to recycle bin (safe delete)"""
         selected_files = self.get_selected_files()
-        
+
         if not selected_files:
             QMessageBox.warning(self, "Warning", "No files selected for deletion")
             return
-        
+
         reply = QMessageBox.question(
-            self, 
+            self,
             "Confirm Delete to Recycle Bin",
             f"Move {len(selected_files)} selected files to Recycle Bin?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        
+
         if reply == QMessageBox.StandardButton.Yes:
-            deleted_count = 0
-            failed_files = []
-            
-            for file_path in selected_files:
-                try:
-                    if HAS_SEND2TRASH:
-                        send2trash(file_path)
-                    else:
-                        os.remove(file_path)  # Fallback to permanent delete
-                    deleted_count += 1
-                except Exception as e:
-                    failed_files.append(f"{file_path}: {e}")
-            
-            # Show results
-            if deleted_count > 0:
-                method = "Recycle Bin" if HAS_SEND2TRASH else "Permanently deleted"
-                QMessageBox.information(
-                    self, 
-                    "Delete Complete", 
-                    f"✅ Successfully moved {deleted_count} files to {method}."
-                )
-            
-            if failed_files:
-                QMessageBox.warning(
-                    self,
-                    "Some Deletions Failed",
-                    f"❌ Failed to delete {len(failed_files)} files:\n\n" + 
-                    "\n".join(failed_files[:5]) +
-                    (f"\n... and {len(failed_files)-5} more" if len(failed_files) > 5 else "")
-                )
-            
-            # Refresh the view
-            self.refresh_current_view()
+            # UI-2: delegate to background thread — never block the main thread
+            self._start_delete_operation(selected_files, use_recycle=True)
     
     def recycle_selected_files(self):
         """Alias for delete_to_recycle_bin"""
         self.delete_to_recycle_bin()
     
+    # ------------------------------------------------------------------ #
+    #  UI-4: Export helpers (run heavy I/O on ExportThread)              #
+    # ------------------------------------------------------------------ #
+
+    def _run_export_thread(self, fn, format_name=""):
+        """Run an export closure on ExportThread (UI-4).
+
+        The file dialog is called before this method so the save path is
+        already known.  The closure fn() does all stat/write work off the
+        main thread to prevent 'Not Responding'.
+        """
+        wait = QDialog(self)
+        wait.setWindowTitle("Exporting…")
+        wait.setWindowModality(Qt.WindowModality.ApplicationModal)
+        wait.setFixedSize(340, 90)
+        wait.setWindowFlags(wait.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint)
+        vbox = QVBoxLayout(wait)
+        vbox.addWidget(QLabel(f"Writing {format_name} report, please wait…"))
+        bar = QProgressBar()
+        bar.setRange(0, 0)   # indeterminate
+        vbox.addWidget(bar)
+
+        thread = ExportThread(fn)
+        self._active_export_thread = thread
+
+        def on_done(success, msg):
+            wait.accept()
+            if success:
+                QMessageBox.information(self, "Export Complete", f"✅ {msg}")
+            else:
+                QMessageBox.critical(self, "Export Error", f"❌ Failed:\n{msg}")
+
+        thread.finished.connect(on_done)
+        thread.start()
+        wait.exec()
+
     def export_to_json(self):
         """Export results to JSON file"""
         if not self.duplicates and not self.similar_files:
             QMessageBox.warning(self, "Warning", "No results to export. Run a scan first.")
             return
-        
+
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save JSON Report", 
+            self, "Save JSON Report",
             f"duplicate_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
             "JSON Files (*.json)"
         )
-        
-        if file_path:
-            try:
-                export_data = {
-                    "scan_date": datetime.now().isoformat(),
-                    "scan_folder": self.directory or "",
-                    "duplicates": {},
-                    "similar_files": {}
+        if not file_path:
+            return
+
+        # Snapshot on main thread so the background closure doesn't race
+        duplicates_snap = dict(self.duplicates)
+        similar_snap    = dict(self.similar_files)
+        scan_folder     = self.directory or ""
+        scan_date       = datetime.now().isoformat()
+
+        def _do_json():
+            export_data = {
+                "scan_date":    scan_date,
+                "scan_folder":  scan_folder,
+                "duplicates":   {},
+                "similar_files": {}
+            }
+            for i, (hash_val, files) in enumerate(duplicates_snap.items()):
+                group = {"files": [], "total_size": 0}
+                for p in files:
+                    try:
+                        sz = os.path.getsize(p)
+                    except Exception:
+                        sz = 0
+                    group["files"].append({"path": p, "name": os.path.basename(p), "size": sz})
+                    group["total_size"] += sz
+                export_data["duplicates"][f"group_{i+1}"] = group
+
+            for i, (key, gd) in enumerate(similar_snap.items()):
+                export_data["similar_files"][f"group_{i+1}"] = {
+                    "reasons": gd.get("reasons", []),
+                    "files": [
+                        {"path": f, "name": os.path.basename(f),
+                         "size": os.path.getsize(f) if os.path.exists(f) else 0}
+                        for f in gd.get("files", [])
+                    ]
                 }
-                
-                # Add duplicate groups
-                for i, (hash_val, files) in enumerate(self.duplicates.items()):
-                    group_data = {
-                        "files": [],
-                        "total_size": 0
-                    }
-                    for file_path_item in files:
-                        try:
-                            size = os.path.getsize(file_path_item)
-                            group_data["files"].append({
-                                "path": file_path_item,
-                                "name": os.path.basename(file_path_item),
-                                "size": size
-                            })
-                            group_data["total_size"] += size
-                        except Exception:
-                            group_data["files"].append({
-                                "path": file_path_item,
-                                "name": os.path.basename(file_path_item),
-                                "size": 0
-                            })
-                    export_data["duplicates"][f"group_{i+1}"] = group_data
-                
-                # Add similar file groups
-                for i, (key, group_data) in enumerate(self.similar_files.items()):
-                    export_data["similar_files"][f"group_{i+1}"] = {
-                        "reasons": group_data.get("reasons", []),
-                        "files": [
-                            {
-                                "path": f,
-                                "name": os.path.basename(f),
-                                "size": os.path.getsize(f) if os.path.exists(f) else 0
-                            } for f in group_data.get("files", [])
-                        ]
-                    }
-                
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(export_data, f, indent=2, ensure_ascii=False)
-                
-                QMessageBox.information(self, "Export Complete", f"✅ Report saved to:\n{file_path}")
-                
-            except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"❌ Failed to export:\n{e}")
-    
+            with open(file_path, 'w', encoding='utf-8') as fh:
+                json.dump(export_data, fh, indent=2, ensure_ascii=False)
+            return f"Report saved to:\n{file_path}"
+
+        self._run_export_thread(_do_json, "JSON")
+
     def export_to_csv(self):
         """Export results to CSV file"""
         if not self.duplicates and not self.similar_files:
             QMessageBox.warning(self, "Warning", "No results to export. Run a scan first.")
             return
-        
+
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save CSV Report", 
+            self, "Save CSV Report",
             f"duplicate_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             "CSV Files (*.csv)"
         )
-        
-        if file_path:
-            try:
-                with open(file_path, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f)
-                    
-                    # Write header
-                    writer.writerow(['Type', 'Group', 'File Name', 'File Path', 'Size (bytes)', 'Reason'])
-                    
-                    # Write duplicates
-                    for i, (hash_val, files) in enumerate(self.duplicates.items()):
-                        for file_path_item in files:
-                            try:
-                                size = os.path.getsize(file_path_item)
-                            except Exception:
-                                size = 0
-                            writer.writerow([
-                                'Duplicate',
-                                f'Group {i+1}',
-                                os.path.basename(file_path_item),
-                                file_path_item,
-                                size,
-                                'Exact hash match'
-                            ])
-                    
-                    # Write similar files
-                    for i, (key, group_data) in enumerate(self.similar_files.items()):
-                        reasons = ", ".join(group_data.get("reasons", []))
-                        for file_path_item in group_data.get("files", []):
-                            try:
-                                size = os.path.getsize(file_path_item)
-                            except Exception:
-                                size = 0
-                            writer.writerow([
-                                'Similar',
-                                f'Group {i+1}',
-                                os.path.basename(file_path_item),
-                                file_path_item,
-                                size,
-                                reasons
-                            ])
-                
-                QMessageBox.information(self, "Export Complete", f"✅ Report saved to:\n{file_path}")
-                
-            except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"❌ Failed to export:\n{e}")
-    
+        if not file_path:
+            return
+
+        duplicates_snap = dict(self.duplicates)
+        similar_snap    = dict(self.similar_files)
+
+        def _do_csv():
+            with open(file_path, 'w', newline='', encoding='utf-8') as fh:
+                writer = csv.writer(fh)
+                writer.writerow(['Type', 'Group', 'File Name', 'File Path', 'Size (bytes)', 'Reason'])
+
+                for i, (hash_val, files) in enumerate(duplicates_snap.items()):
+                    for p in files:
+                        try:
+                            sz = os.path.getsize(p)
+                        except Exception:
+                            sz = 0
+                        writer.writerow(['Duplicate', f'Group {i+1}',
+                                         os.path.basename(p), p, sz, 'Exact hash match'])
+
+                for i, (key, gd) in enumerate(similar_snap.items()):
+                    reasons = ", ".join(gd.get("reasons", []))
+                    for p in gd.get("files", []):
+                        try:
+                            sz = os.path.getsize(p)
+                        except Exception:
+                            sz = 0
+                        writer.writerow(['Similar', f'Group {i+1}',
+                                         os.path.basename(p), p, sz, reasons])
+            return f"Report saved to:\n{file_path}"
+
+        self._run_export_thread(_do_csv, "CSV")
+
     def export_to_html(self):
         """Export results to HTML report"""
         if not self.duplicates and not self.similar_files:
             QMessageBox.warning(self, "Warning", "No results to export. Run a scan first.")
             return
-        
+
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save HTML Report", 
+            self, "Save HTML Report",
             f"duplicate_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
             "HTML Files (*.html)"
         )
-        
-        if file_path:
-            try:
-                html_content = f"""<!DOCTYPE html>
+        if not file_path:
+            return
+
+        duplicates_snap = dict(self.duplicates)
+        similar_snap    = dict(self.similar_files)
+        scan_folder     = self.directory or "N/A"
+        scan_date_str   = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        fmt             = self.format_file_size   # pure helper, safe to call off-thread
+
+        def _do_html():
+            parts = [f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -5835,83 +6034,102 @@ class EnhancedDuplicateFinder(QMainWindow):
         .file-size {{ color: #888; font-size: 0.85em; }}
         .similar {{ border-left-color: #2196F3; }}
         .reasons {{ color: #2196F3; font-style: italic; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-        th, td {{ padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }}
-        th {{ background-color: #4CAF50; color: white; }}
-        tr:hover {{ background-color: #f5f5f5; }}
     </style>
 </head>
 <body>
     <h1>🔍 Duplicate File Report</h1>
     <div class="summary">
-        <p><strong>📅 Scan Date:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        <p><strong>📁 Scanned Folder:</strong> {self.directory or "N/A"}</p>
-        <p><strong>📊 Duplicate Groups:</strong> {len(self.duplicates)}</p>
-        <p><strong>🔗 Similar File Groups:</strong> {len(self.similar_files)}</p>
+        <p><strong>📅 Scan Date:</strong> {scan_date_str}</p>
+        <p><strong>📁 Scanned Folder:</strong> {scan_folder}</p>
+        <p><strong>📊 Duplicate Groups:</strong> {len(duplicates_snap)}</p>
+        <p><strong>🔗 Similar File Groups:</strong> {len(similar_snap)}</p>
     </div>
-"""
-                
-                # Add duplicates section
-                if self.duplicates:
-                    html_content += "    <h2>📋 Duplicate Files</h2>\n"
-                    for i, (hash_val, files) in enumerate(self.duplicates.items()):
-                        total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
-                        html_content += f'    <div class="group">\n'
-                        html_content += f'        <h3>Group {i+1} ({len(files)} files, {self.format_file_size(total_size)} total)</h3>\n'
-                        for file_path_item in files:
-                            try:
-                                size = self.format_file_size(os.path.getsize(file_path_item))
-                            except Exception:
-                                size = "Unknown"
-                            html_content += f'        <div class="file">\n'
-                            html_content += f'            <strong>{os.path.basename(file_path_item)}</strong>\n'
-                            html_content += f'            <div class="file-path">{file_path_item}</div>\n'
-                            html_content += f'            <div class="file-size">Size: {size}</div>\n'
-                            html_content += f'        </div>\n'
-                        html_content += '    </div>\n'
-                
-                # Add similar files section
-                if self.similar_files:
-                    html_content += "    <h2>🔗 Similar Files</h2>\n"
-                    for i, (key, group_data) in enumerate(self.similar_files.items()):
-                        reasons = ", ".join(group_data.get("reasons", []))
-                        files = group_data.get("files", [])
-                        html_content += f'    <div class="group">\n'
-                        html_content += f'        <h3>Group {i+1} ({len(files)} files)</h3>\n'
-                        html_content += f'        <p class="reasons">Similarity: {reasons}</p>\n'
-                        for file_path_item in files:
-                            try:
-                                size = self.format_file_size(os.path.getsize(file_path_item))
-                            except Exception:
-                                size = "Unknown"
-                            html_content += f'        <div class="file similar">\n'
-                            html_content += f'            <strong>{os.path.basename(file_path_item)}</strong>\n'
-                            html_content += f'            <div class="file-path">{file_path_item}</div>\n'
-                            html_content += f'            <div class="file-size">Size: {size}</div>\n'
-                            html_content += f'        </div>\n'
-                        html_content += '    </div>\n'
-                
-                html_content += """
-</body>
-</html>"""
-                
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(html_content)
-                
-                QMessageBox.information(self, "Export Complete", f"✅ Report saved to:\n{file_path}")
-                
-                # Offer to open in browser
-                reply = QMessageBox.question(
-                    self, "Open Report",
-                    "Would you like to open the report in your browser?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                )
-                if reply == QMessageBox.StandardButton.Yes:
-                    import webbrowser
-                    webbrowser.open(f'file:///{file_path}')
-                
-            except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"❌ Failed to export:\n{e}")
+"""]
+            if duplicates_snap:
+                parts.append("    <h2>📋 Duplicate Files</h2>\n")
+                for i, (_, files) in enumerate(duplicates_snap.items()):
+                    total = sum(os.path.getsize(f) for f in files if os.path.exists(f))
+                    parts.append(f'    <div class="group">\n')
+                    parts.append(f'        <h3>Group {i+1} ({len(files)} files, {fmt(total)} total)</h3>\n')
+                    for p in files:
+                        try:
+                            sz = fmt(os.path.getsize(p))
+                        except Exception:
+                            sz = "Unknown"
+                        parts.append(
+                            f'        <div class="file">\n'
+                            f'            <strong>{os.path.basename(p)}</strong>\n'
+                            f'            <div class="file-path">{p}</div>\n'
+                            f'            <div class="file-size">Size: {sz}</div>\n'
+                            f'        </div>\n'
+                        )
+                    parts.append('    </div>\n')
+
+            if similar_snap:
+                parts.append("    <h2>🔗 Similar Files</h2>\n")
+                for i, (_, gd) in enumerate(similar_snap.items()):
+                    reasons = ", ".join(gd.get("reasons", []))
+                    files   = gd.get("files", [])
+                    parts.append(
+                        f'    <div class="group">\n'
+                        f'        <h3>Group {i+1} ({len(files)} files)</h3>\n'
+                        f'        <p class="reasons">Similarity: {reasons}</p>\n'
+                    )
+                    for p in files:
+                        try:
+                            sz = fmt(os.path.getsize(p))
+                        except Exception:
+                            sz = "Unknown"
+                        parts.append(
+                            f'        <div class="file similar">\n'
+                            f'            <strong>{os.path.basename(p)}</strong>\n'
+                            f'            <div class="file-path">{p}</div>\n'
+                            f'            <div class="file-size">Size: {sz}</div>\n'
+                            f'        </div>\n'
+                        )
+                    parts.append('    </div>\n')
+
+            parts.append("</body>\n</html>")
+            with open(file_path, 'w', encoding='utf-8') as fh:
+                fh.write("".join(parts))
+            return f"Report saved to:\n{file_path}"
+
+        # After export completes, offer to open in browser (must ask on main thread)
+        def on_export_done(success, msg):
+            if not success:
+                QMessageBox.critical(self, "Export Error", f"❌ Failed:\n{msg}")
+                return
+            QMessageBox.information(self, "Export Complete", f"✅ {msg}")
+            reply = QMessageBox.question(
+                self, "Open Report",
+                "Would you like to open the report in your browser?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                import webbrowser
+                webbrowser.open(f"file:///{file_path}")
+
+        # Use ExportThread directly here so we can intercept on_done for browser prompt
+        wait = QDialog(self)
+        wait.setWindowTitle("Exporting…")
+        wait.setWindowModality(Qt.WindowModality.ApplicationModal)
+        wait.setFixedSize(340, 90)
+        wait.setWindowFlags(wait.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint)
+        vbox = QVBoxLayout(wait)
+        vbox.addWidget(QLabel("Writing HTML report, please wait…"))
+        bar = QProgressBar()
+        bar.setRange(0, 0)
+        vbox.addWidget(bar)
+        thread = ExportThread(_do_html)
+        self._active_export_thread = thread
+
+        def _on_done(success, msg):
+            wait.accept()
+            on_export_done(success, msg)
+
+        thread.finished.connect(_on_done)
+        thread.start()
+        wait.exec()
 
     # ==================== Advanced Config & Undo Methods ====================
     
@@ -6166,23 +6384,48 @@ Confidence: {analysis.get('confidence', 0):.1%}
 """
         QMessageBox.about(self, "About", about_text)
 
-    def _prune_result_sets(self):
-        """Remove result entries for files that no longer exist."""
-        pruned_duplicates = {}
-        for hash_val, files in self.duplicates.items():
-            existing_files = [file_path for file_path in files if os.path.exists(file_path)]
-            if len(existing_files) > 1:
-                pruned_duplicates[hash_val] = existing_files
-        self.duplicates = pruned_duplicates
+    def _prune_result_sets(self, removed_files=None):
+        """Remove result entries for files that no longer exist.
 
-        pruned_similar = {}
-        for key, group_data in self.similar_files.items():
-            existing_files = [file_path for file_path in group_data.get("files", []) if os.path.exists(file_path)]
-            if len(existing_files) > 1:
-                updated_group = dict(group_data)
-                updated_group["files"] = existing_files
-                pruned_similar[key] = updated_group
-        self.similar_files = pruned_similar
+        UI-3 fast path: when removed_files is provided (a list of paths that
+        were just deleted or moved), use a set-lookup to drop them — no
+        os.path.exists() calls needed.  For an unknown removal set (e.g. after
+        import/undo) the slow path re-checks every file against the filesystem.
+        """
+        if removed_files is not None:
+            removed = set(removed_files)
+            pruned_duplicates = {}
+            for hash_val, files in self.duplicates.items():
+                remaining = [f for f in files if f not in removed]
+                if len(remaining) > 1:
+                    pruned_duplicates[hash_val] = remaining
+            self.duplicates = pruned_duplicates
+
+            pruned_similar = {}
+            for key, group_data in self.similar_files.items():
+                remaining = [f for f in group_data.get("files", []) if f not in removed]
+                if len(remaining) > 1:
+                    updated = dict(group_data)
+                    updated["files"] = remaining
+                    pruned_similar[key] = updated
+            self.similar_files = pruned_similar
+        else:
+            # Slow path — only used when we don't know which files were removed
+            pruned_duplicates = {}
+            for hash_val, files in self.duplicates.items():
+                existing = [f for f in files if os.path.exists(f)]
+                if len(existing) > 1:
+                    pruned_duplicates[hash_val] = existing
+            self.duplicates = pruned_duplicates
+
+            pruned_similar = {}
+            for key, group_data in self.similar_files.items():
+                existing = [f for f in group_data.get("files", []) if os.path.exists(f)]
+                if len(existing) > 1:
+                    updated = dict(group_data)
+                    updated["files"] = existing
+                    pruned_similar[key] = updated
+            self.similar_files = pruned_similar
     
     def closeEvent(self, event):
         """Handle application close - save state and cleanup"""
@@ -6218,8 +6461,37 @@ Confidence: {analysis.get('confidence', 0):.1%}
                 return
             elif reply == QMessageBox.StandardButton.No:
                 self.undo_manager.clear_backups()
+
+        self._shutdown_worker_threads()
         
         event.accept()
+
+    def _shutdown_worker_threads(self):
+        """Stop any live worker threads before Qt destroys their wrappers."""
+        thread_attrs = [
+            "scan_thread",
+            "_quality_thread",
+            "_active_move_thread",
+            "_active_delete_thread",
+            "_active_export_thread",
+        ]
+
+        for attr in thread_attrs:
+            thread = getattr(self, attr, None)
+            if thread is None:
+                continue
+            try:
+                if hasattr(thread, "cancel"):
+                    thread.cancel()
+                if thread.isRunning():
+                    thread.quit()
+                    if not thread.wait(5000):
+                        thread.terminate()
+                        thread.wait(2000)
+            except Exception as e:
+                logger.warning(f"Thread shutdown warning for {attr}: {e}")
+            finally:
+                setattr(self, attr, None)
 
 
 if __name__ == "__main__":

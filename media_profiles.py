@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import functools
+import threading as _threading
 import zipfile
+import concurrent.futures as _cf
 from copy import deepcopy
 from typing import Any, Dict, Iterable, Optional, Tuple
 
@@ -34,6 +37,9 @@ except ImportError:
 try:
     import fitz  # PyMuPDF
     HAS_PYMUPDF = True
+    # Suppress MuPDF's internal error/warning printer — corrupt PDFs print
+    # "MuPDF error: ..." to stderr even when the exception is caught.
+    fitz.TOOLS.mupdf_display_errors(False)
 except ImportError:
     fitz = None
     HAS_PYMUPDF = False
@@ -128,22 +134,79 @@ def _read_text(file_path: str) -> str:
         return ""
 
 
+_PDF_EXTRACT_TIMEOUT = 12   # seconds per PDF file before giving up
+_PDF_MAX_PAGES       = 300  # ignore absurdly large / corrupt documents
+_TEXT_READ_MAX_BYTES = 10 * 1024 * 1024  # 10 MB cap for raw-text read
+
+
+# ROOT-CAUSE fix: cache per-file text extraction so that each PDF (or other
+# document) is extracted at most once during a similarity scan even when the
+# same file appears in many pairs.  Without this, a scan with N document files
+# would decode the same PDF N times, each potentially blocking for up to the
+# daemon-thread timeout value.
+@functools.lru_cache(maxsize=1024)
 def extract_document_text(file_path: str) -> str:
     ext = os.path.splitext(file_path)[1].lower()
+
+    # Fast path: plain text / code / markup — read directly (with size cap)
     if ext in {".txt", ".md", ".py", ".json", ".yaml", ".yml", ".xml", ".html", ".css", ".js"}:
         return _read_text(file_path)
-    if ext == ".pdf" and HAS_PYMUPDF:
+
+    if ext == ".pdf":
+        # Skip huge files — text extraction would be too slow to be useful
         try:
-            with fitz.open(file_path) as doc:
-                return "\n".join(page.get_text("text") for page in doc)
-        except Exception:
-            pass
-    if ext == ".pdf" and HAS_PYPDF:
-        try:
-            reader = PdfReader(file_path)
-            return "\n".join(page.extract_text() or "" for page in reader.pages)
-        except Exception:
-            pass
+            if os.path.getsize(file_path) > 100 * 1024 * 1024:   # 100 MB
+                return ""
+        except OSError:
+            return ""
+
+        # PyMuPDF — run in a daemon thread with a hard timeout so a corrupt
+        # object stream can't hang the scan indefinitely (FIX-A).
+        # threading.Thread.join(timeout) returns after the deadline regardless,
+        # unlike ThreadPoolExecutor.__exit__ which calls shutdown(wait=True).
+        if HAS_PYMUPDF:
+            _fitz_result: list = [None]
+
+            def _fitz_worker() -> None:
+                try:
+                    with fitz.open(file_path) as doc:
+                        if len(doc) > _PDF_MAX_PAGES:
+                            return
+                        _fitz_result[0] = "\n".join(
+                            page.get_text("text") for page in doc
+                        )
+                except Exception:
+                    pass
+
+            _t = _threading.Thread(target=_fitz_worker, daemon=True)
+            _t.start()
+            _t.join(timeout=_PDF_EXTRACT_TIMEOUT)
+            if _fitz_result[0]:
+                return _fitz_result[0]
+
+        # pypdf fallback — same daemon-thread pattern
+        if HAS_PYPDF:
+            _pypdf_result: list = [None]
+
+            def _pypdf_worker() -> None:
+                try:
+                    reader = PdfReader(file_path)
+                    if len(reader.pages) > _PDF_MAX_PAGES:
+                        return
+                    _pypdf_result[0] = "\n".join(
+                        page.extract_text() or "" for page in reader.pages
+                    )
+                except Exception:
+                    pass
+
+            _t = _threading.Thread(target=_pypdf_worker, daemon=True)
+            _t.start()
+            _t.join(timeout=_PDF_EXTRACT_TIMEOUT)
+            if _pypdf_result[0]:
+                return _pypdf_result[0]
+
+        return ""   # could not extract text from this PDF
+
     return _read_text(file_path)
 
 
