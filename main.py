@@ -3630,6 +3630,17 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.audio_smart_move_btn.setStyleSheet("background-color: #6a1b9a; color: white; padding: 8px 16px;")
         self.audio_smart_move_btn.setMinimumHeight(38)
         actions_row_top.addWidget(self.audio_smart_move_btn)
+
+        self.move_perfect_audio_btn = QPushButton("Move 100% Audio Matches")
+        self.move_perfect_audio_btn.clicked.connect(self.show_perfect_audio_move_preview)
+        self.move_perfect_audio_btn.setEnabled(False)
+        self.move_perfect_audio_btn.setToolTip(
+            "Move files from Similar groups with 100% hybrid audio similarity.\n"
+            "The best-quality version in each group is kept; all others are moved first."
+        )
+        self.move_perfect_audio_btn.setStyleSheet("background-color: #e65100; color: white; padding: 8px 16px;")
+        self.move_perfect_audio_btn.setMinimumHeight(38)
+        actions_row_top.addWidget(self.move_perfect_audio_btn)
         actions_row_top.addStretch()
         
         self.select_all_btn = QPushButton("Select All")
@@ -4900,6 +4911,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         has_destination = self.move_destination is not None
         self.bulk_move_btn.setEnabled(has_duplicates and has_destination)
         self.audio_smart_move_btn.setEnabled(has_duplicates and has_destination and self._has_audio_duplicates())
+        self.move_perfect_audio_btn.setEnabled(has_destination and self._has_perfect_audio_similar())
 
     def _is_audio_file(self, file_path):
         ext = os.path.splitext(file_path)[1].lower()
@@ -4910,6 +4922,13 @@ class EnhancedDuplicateFinder(QMainWindow):
         for files in self.duplicates.values():
             audio_files = [f for f in files if self._is_audio_file(f)]
             if len(audio_files) >= 2:
+                return True
+        return False
+
+    def _has_perfect_audio_similar(self):
+        """Return True if any similar group has 100% audio similarity via hybrid."""
+        for group_data in getattr(self, 'similar_files', {}).values():
+            if any('Similar audio (100%' in r for r in group_data.get('reasons', [])):
                 return True
         return False
 
@@ -5684,6 +5703,174 @@ class EnhancedDuplicateFinder(QMainWindow):
                 kept_log=kept_log,
                 warnings=warnings
             )
+
+        thread.progress.connect(on_progress)
+        thread.status.connect(on_status)
+        thread.result.connect(on_finished)
+        cancel_btn.clicked.connect(on_cancel)
+
+        thread.start()
+        progress_dialog.exec()
+
+    # ------------------------------------------------------------------
+    # Move 100% Audio Matches
+    # ------------------------------------------------------------------
+
+    def show_perfect_audio_move_preview(self):
+        """Preview and move files from Similar groups that matched at 100% via hybrid audio fingerprint."""
+        if not self.move_destination:
+            QMessageBox.warning(self, "No Destination", "Please select a move destination first.")
+            return
+        if not getattr(self, 'similar_files', {}):
+            QMessageBox.information(self, "No Similar Files", "Run a scan first.")
+            return
+
+        # Collect every similar group whose reason list contains "Similar audio (100%"
+        perfect_groups = []
+        for key, group_data in self.similar_files.items():
+            reasons = group_data.get('reasons', [])
+            if any('Similar audio (100%' in r for r in reasons):
+                files = group_data.get('files', [])
+                if len(files) < 2:
+                    continue
+                keep = self._suggest_file_to_keep(files)
+                move_files = [f for f in files if f != keep]
+                perfect_groups.append({
+                    'key': key,
+                    'files': files,
+                    'keep': keep,
+                    'move_files': move_files,
+                    'reason': next((r for r in reasons if 'Similar audio' in r), reasons[0] if reasons else ''),
+                })
+
+        if not perfect_groups:
+            QMessageBox.information(
+                self, "No 100% Audio Matches",
+                "No Similar groups with 100% hybrid audio similarity were found.\n"
+                "Run a scan with the Audio hash type to detect them."
+            )
+            return
+
+        total_to_move = sum(len(g['move_files']) for g in perfect_groups)
+
+        # ---- Preview dialog ----
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Move 100% Audio Matches — Preview")
+        dialog.resize(860, 560)
+        layout = QVBoxLayout(dialog)
+
+        summary_group = QGroupBox("Summary")
+        summary_layout = QVBoxLayout(summary_group)
+        summary_layout.addWidget(QLabel(f"<b>Groups with 100% audio match:</b> {len(perfect_groups)}"))
+        summary_layout.addWidget(QLabel(f"<b>Files to MOVE:</b> {total_to_move}"))
+        summary_layout.addWidget(QLabel(
+            f"<b>Files to KEEP</b> (best quality per group): {len(perfect_groups)}"
+        ))
+        summary_layout.addWidget(QLabel(f"<b>Destination:</b> {self.move_destination}"))
+        layout.addWidget(summary_group)
+
+        preview_tree = QTreeWidget()
+        preview_tree.setHeaderLabels(["File", "Format / Size", "Match Reason", "Action"])
+        preview_tree.setAlternatingRowColors(True)
+
+        for g in perfect_groups:
+            group_item = QTreeWidgetItem()
+            group_item.setText(0, f"100% Audio Match ({len(g['files'])} files)")
+            group_item.setText(2, g['reason'])
+            preview_tree.addTopLevelItem(group_item)
+
+            for f in g['files']:
+                item = QTreeWidgetItem(group_item)
+                item.setText(0, os.path.basename(f))
+                ext = os.path.splitext(f)[1].upper().lstrip('.')
+                try:
+                    size = self.format_file_size(os.path.getsize(f))
+                except OSError:
+                    size = "?"
+                item.setText(1, f"{ext}  {size}")
+
+                if f == g['keep']:
+                    item.setText(3, "⭐ KEEP")
+                    item.setForeground(3, QColor(0, 150, 0))
+                    font = item.font(0)
+                    font.setBold(True)
+                    item.setFont(0, font)
+                else:
+                    item.setText(3, "📦 MOVE")
+                    item.setForeground(3, QColor(200, 0, 0))
+
+        preview_tree.expandAll()
+        for i in range(preview_tree.columnCount()):
+            preview_tree.resizeColumnToContents(i)
+        layout.addWidget(preview_tree)
+
+        btn_row = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addStretch()
+
+        proceed_btn = QPushButton(f"Move {total_to_move} File{'s' if total_to_move != 1 else ''}")
+        proceed_btn.setStyleSheet("background-color: #e65100; color: white; padding: 8px 16px;")
+        proceed_btn.clicked.connect(
+            lambda: self._start_perfect_audio_move(perfect_groups, dialog)
+        )
+        btn_row.addWidget(proceed_btn)
+        layout.addLayout(btn_row)
+
+        dialog.exec()
+
+    def _start_perfect_audio_move(self, perfect_groups, preview_dialog):
+        """Execute the move for 100% audio match groups."""
+        preview_dialog.accept()
+
+        files_to_move = []
+        for g in perfect_groups:
+            files_to_move.extend(g['move_files'])
+
+        if not files_to_move:
+            return
+
+        os.makedirs(self.move_destination, exist_ok=True)
+
+        progress_dialog = QDialog(self)
+        progress_dialog.setWindowTitle("Moving 100% Audio Matches")
+        progress_dialog.resize(480, 160)
+        prog_layout = QVBoxLayout(progress_dialog)
+
+        status_label = QLabel("Preparing move…")
+        prog_layout.addWidget(status_label)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, len(files_to_move))
+        prog_layout.addWidget(progress_bar)
+
+        btn_row = QHBoxLayout()
+        cancel_btn = QPushButton("Cancel")
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        prog_layout.addLayout(btn_row)
+
+        thread = BulkMoveThread(files_to_move, self.move_destination)
+        self._active_move_thread = thread
+        self._retain_thread_until_finished(thread)
+        self._clear_thread_attr_when_finished("_active_move_thread", thread)
+
+        def on_progress(done, total):
+            progress_bar.setValue(done)
+            progress_bar.setMaximum(total)
+
+        def on_status(text):
+            status_label.setText(text)
+
+        def on_cancel():
+            status_label.setText("Cancelling…")
+            cancel_btn.setEnabled(False)
+            thread.cancel()
+
+        def on_finished(result):
+            progress_dialog.accept()
+            self._handle_bulk_move_results(result, operation_name="Move 100% Audio Matches")
 
         thread.progress.connect(on_progress)
         thread.status.connect(on_status)
