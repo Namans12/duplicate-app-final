@@ -35,14 +35,17 @@ def launch_application(script_name):
     """Launch the maintained application."""
     try:
         write_line(f"Launching {script_name}...")
-        bootstrap = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bootstrap_launch.py")
-        target = bootstrap if os.path.exists(bootstrap) else script_name
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        bootstrap = os.path.join(base_dir, "bootstrap_launch.py")
+        script_path = os.path.join(base_dir, script_name)
+        target = bootstrap if os.path.exists(bootstrap) else script_path
         command = [sys.executable, target]
         if target == bootstrap:
-            command.append(script_name)
+            command.append(script_path)
         result = subprocess.run(command)  # L-1: removed check=True — non-zero exit on close is not an error
         if result.returncode != 0:
             write_line(f"Note: {script_name} exited with code {result.returncode}")
+            return False
     except KeyboardInterrupt:
         write_line(f"\n{script_name} interrupted by user")
         return False
@@ -71,7 +74,8 @@ def main():
     write_line(f"OK: {deps_msg}")
 
     script = "main.py"
-    if not os.path.exists(script):
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), script)
+    if not os.path.exists(script_path):
         write_line("Error: main.py not found.")
         return
 

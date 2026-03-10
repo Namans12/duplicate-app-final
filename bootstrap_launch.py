@@ -10,7 +10,11 @@ def main() -> int:
         print("Usage: bootstrap_launch.py <script> [args...]")
         return 1
 
+    base_dir = os.path.dirname(os.path.abspath(__file__))
     script = sys.argv[1]
+    if not os.path.isabs(script):
+        script = os.path.join(base_dir, script)
+    script = os.path.abspath(script)
     if not os.path.exists(script):
         print(f"Script not found: {script}")
         return 1

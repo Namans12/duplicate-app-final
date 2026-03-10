@@ -295,10 +295,17 @@ class DatabaseManager:
                 pass
 
         # Fetch all cached entries in a single query and compare in Python (DB-2 fix)
+        directory_prefix = os.path.join(os.path.abspath(directory), "")
+
         with self._lock, self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT file_path, file_size, modification_time FROM file_cache",
+                """
+                SELECT file_path, file_size, modification_time
+                FROM file_cache
+                WHERE file_path LIKE ?
+                """,
+                (f"{directory_prefix}%",),
             )
             cached: Dict[str, Tuple[int, float]] = {
                 row[0]: (row[1], row[2]) for row in cursor.fetchall()

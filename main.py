@@ -2568,6 +2568,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         self._active_move_thread = None
         self._active_delete_thread = None
         self._active_export_thread = None
+        self._retained_threads = []
         self.scan_start_time = None
         self.audio_quality_analyzer = AudioQualityAnalyzer()
         self.audio_extensions = {'.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.m4a', '.opus', '.aiff', '.ape', '.alac', '.wv'}
@@ -4269,6 +4270,8 @@ class EnhancedDuplicateFinder(QMainWindow):
             use_parallel=use_parallel,
             use_gpu=use_gpu
         )
+        self._retain_thread_until_finished(self.scan_thread)
+        self._clear_thread_attr_when_finished("scan_thread", self.scan_thread)
         self.scan_thread.progress.connect(self.progress_bar.setValue)
         self.scan_thread.status_update.connect(self.status_label.setText)
         self.scan_thread.current_file.connect(self.update_current_file)
@@ -4287,8 +4290,48 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.current_file_label.setText(f"{filename[:50]}..." if len(filename) > 50 else filename)
     
     def update_files_count(self, processed, total):
-        """Update files processed count"""
-        self.files_count_label.setText(f"{processed:,} / {total:,} files")
+        """Update scan progress count."""
+        status_text = self.status_label.text().lower()
+        unit = "pairs" if "finding similar files" in status_text or "similarity scan" in status_text else "files"
+        self.files_count_label.setText(f"{processed:,} / {total:,} {unit}")
+
+    def _retain_thread_until_finished(self, thread):
+        """Keep a Python reference to a worker thread until Qt reports it finished."""
+        if thread is None:
+            return
+        self._retained_threads.append(thread)
+
+        def _cleanup():
+            try:
+                self._retained_threads.remove(thread)
+            except ValueError:
+                pass
+
+        thread.finished.connect(_cleanup)
+
+    def _clear_thread_attr_when_finished(self, attr_name, thread):
+        """Clear a thread attribute only if it still points to this thread."""
+        if thread is None:
+            return
+
+        def _cleanup_attr():
+            if getattr(self, attr_name, None) is thread:
+                setattr(self, attr_name, None)
+
+        thread.finished.connect(_cleanup_attr)
+
+    def _stop_quality_thread(self, wait_ms=1500):
+        """Cancel the active quality worker and wait briefly for shutdown."""
+        thread = self._quality_thread
+        if thread is None:
+            return
+        self._retain_thread_until_finished(thread)
+        try:
+            thread.cancel()
+            if thread.isRunning():
+                thread.wait(wait_ms)
+        finally:
+            self._quality_thread = None
     
     def toggle_pause(self):
         """Toggle pause/resume scan"""
@@ -4331,6 +4374,7 @@ class EnhancedDuplicateFinder(QMainWindow):
     
     def scan_completed(self, duplicates, similar_files):
         """Handle scan completion"""
+        self.scan_thread = None
         self.duplicates = duplicates
         self.similar_files = similar_files
         self.progress_bar.setVisible(False)
@@ -4604,10 +4648,7 @@ class EnhancedDuplicateFinder(QMainWindow):
             return
 
         # UI-5: cancel any in-flight quality thread from a previous group click
-        if hasattr(self, '_quality_thread') and self._quality_thread is not None:
-            self._quality_thread.cancel()
-            self._quality_thread.quit()
-            self._quality_thread = None
+        self._stop_quality_thread()
 
         hash_val = current.data(0, Qt.ItemDataRole.UserRole)
         files = self.duplicates.get(hash_val, [])
@@ -4685,6 +4726,8 @@ class EnhancedDuplicateFinder(QMainWindow):
                     break
 
         self._quality_thread = GroupQualityThread(files, self._get_quality_info)
+        self._retain_thread_until_finished(self._quality_thread)
+        self._clear_thread_attr_when_finished("_quality_thread", self._quality_thread)
         self._quality_thread.quality_ready.connect(_apply_dup_quality)
         self._quality_thread.start()
     
@@ -4694,10 +4737,7 @@ class EnhancedDuplicateFinder(QMainWindow):
             return
 
         # UI-5: cancel any in-flight quality thread from a previous group click
-        if hasattr(self, '_quality_thread') and self._quality_thread is not None:
-            self._quality_thread.cancel()
-            self._quality_thread.quit()
-            self._quality_thread = None
+        self._stop_quality_thread()
 
         group_key = current.data(0, Qt.ItemDataRole.UserRole)
         group_data = self.similar_files.get(group_key, {})
@@ -4776,6 +4816,8 @@ class EnhancedDuplicateFinder(QMainWindow):
                     break
 
         self._quality_thread = GroupQualityThread(files, self._get_quality_info)
+        self._retain_thread_until_finished(self._quality_thread)
+        self._clear_thread_attr_when_finished("_quality_thread", self._quality_thread)
         self._quality_thread.quality_ready.connect(_apply_sim_quality)
         self._quality_thread.start()
     
@@ -5292,6 +5334,8 @@ class EnhancedDuplicateFinder(QMainWindow):
 
         thread = BulkMoveThread(files_to_move, self.move_destination)
         self._active_move_thread = thread
+        self._retain_thread_until_finished(thread)
+        self._clear_thread_attr_when_finished("_active_move_thread", thread)
 
         def on_progress(done, total):
             progress_bar.setValue(done)
@@ -5357,6 +5401,8 @@ class EnhancedDuplicateFinder(QMainWindow):
             undo_enabled=undo_enabled,
         )
         self._active_delete_thread = thread
+        self._retain_thread_until_finished(thread)
+        self._clear_thread_attr_when_finished("_active_delete_thread", thread)
 
         def on_progress(done, total):
             progress_bar.setValue(done)
@@ -5613,6 +5659,8 @@ class EnhancedDuplicateFinder(QMainWindow):
 
         thread = BulkMoveThread(files_to_move, self.move_destination)
         self._active_move_thread = thread
+        self._retain_thread_until_finished(thread)
+        self._clear_thread_attr_when_finished("_active_move_thread", thread)
 
         def on_progress(done, total):
             progress_bar.setValue(done)
@@ -5886,6 +5934,8 @@ class EnhancedDuplicateFinder(QMainWindow):
 
         thread = ExportThread(fn)
         self._active_export_thread = thread
+        self._retain_thread_until_finished(thread)
+        self._clear_thread_attr_when_finished("_active_export_thread", thread)
 
         def on_done(success, msg):
             wait.accept()
@@ -6122,6 +6172,8 @@ class EnhancedDuplicateFinder(QMainWindow):
         vbox.addWidget(bar)
         thread = ExportThread(_do_html)
         self._active_export_thread = thread
+        self._retain_thread_until_finished(thread)
+        self._clear_thread_attr_when_finished("_active_export_thread", thread)
 
         def _on_done(success, msg):
             wait.accept()
@@ -6484,7 +6536,6 @@ Confidence: {analysis.get('confidence', 0):.1%}
                 if hasattr(thread, "cancel"):
                     thread.cancel()
                 if thread.isRunning():
-                    thread.quit()
                     if not thread.wait(5000):
                         thread.terminate()
                         thread.wait(2000)

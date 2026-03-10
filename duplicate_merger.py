@@ -527,9 +527,11 @@ class FileMerger:
                 file2_mtime = os.path.getmtime(secondary_file)
                 
                 if file1_mtime > file2_mtime:
-                    shutil.copy2(primary_file, output_path)
+                    if os.path.abspath(primary_file) != os.path.abspath(output_path):
+                        shutil.copy2(primary_file, output_path)
                 else:
-                    shutil.copy2(secondary_file, output_path)
+                    if os.path.abspath(secondary_file) != os.path.abspath(output_path):
+                        shutil.copy2(secondary_file, output_path)
                     
             elif strategy == "merge_with_comments":
                 # Create merged file with conflict markers

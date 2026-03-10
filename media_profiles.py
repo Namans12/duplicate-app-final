@@ -59,7 +59,7 @@ MEDIA_EXTENSIONS = {
     "audio": {".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".opus", ".wma"},
     "documents": {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".rtf", ".md"},
     "code": {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".html", ".css", ".json", ".xml", ".yaml", ".yml"},
-    "archives": {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"},
+    "archives": {".zip"},
 }
 
 
