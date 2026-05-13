@@ -8,7 +8,12 @@ import zipfile
 from copy import deepcopy
 from typing import Any, Dict, Iterable, Optional, Tuple
 
-import xxhash
+try:
+    import xxhash
+    HAS_XXHASH = True
+except ImportError:
+    xxhash = None
+    HAS_XXHASH = False
 
 try:
     from PIL import Image
@@ -102,7 +107,11 @@ def compute_exact_hash(file_path: str, hash_name: str = "XXH3_128") -> Optional[
         elif hash_name == "SHA256":
             h = hashlib.sha256()
         else:
-            h = xxhash.xxh3_128()
+            # Default fast path uses xxhash if available; fall back to sha256.
+            if HAS_XXHASH:
+                h = xxhash.xxh3_128()
+            else:
+                h = hashlib.sha256()
         with open(file_path, "rb") as handle:
             for chunk in iter(lambda: handle.read(65536), b""):
                 h.update(chunk)
@@ -155,11 +164,19 @@ def compare_document_files(file1: str, file2: str, profile: Dict[str, Any], sema
     return lexical >= threshold, lexical, reasons
 
 
+_MAX_ZIP_ENTRIES = 10000
+
+
 def compare_archive_files(file1: str, file2: str, profile: Dict[str, Any]) -> Tuple[bool, float, list[str]]:
     try:
         with zipfile.ZipFile(file1) as zip1, zipfile.ZipFile(file2) as zip2:
-            set1 = {(item.filename, item.file_size) for item in zip1.infolist()}
-            set2 = {(item.filename, item.file_size) for item in zip2.infolist()}
+            info1 = zip1.infolist()
+            info2 = zip2.infolist()
+            if len(info1) > _MAX_ZIP_ENTRIES or len(info2) > _MAX_ZIP_ENTRIES:
+                # Too many entries — bail out to avoid memory/CPU spikes.
+                return False, 0.0, [f"zip too large (>{_MAX_ZIP_ENTRIES} entries)"]
+            set1 = {(item.filename, item.file_size) for item in info1}
+            set2 = {(item.filename, item.file_size) for item in info2}
     except Exception:
         return False, 0.0, []
 

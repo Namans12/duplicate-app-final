@@ -7,6 +7,7 @@ Technical: CUDA GPU Acceleration, Parallel Processing, Memory Optimization
 import sys
 import os
 import hashlib
+import html
 import shutil
 import json
 import csv
@@ -15,6 +16,7 @@ import threading
 import multiprocessing
 from copy import deepcopy
 from datetime import datetime, timedelta
+import collections
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
@@ -680,14 +682,14 @@ class FileComparator:
                                 try:
                                     similarity = semantic_engine.compare(content1, content2)
                                     return similarity >= similarity_threshold
-                                except Exception:
-                                    pass  # Fall through to syntactic comparison
-                        
+                                except Exception as e:
+                                    logger.warning(f"Semantic compare failed, falling back to syntactic: {e}", exc_info=True)
+
                         # Fallback to syntactic comparison (SequenceMatcher)
                         ratio = SequenceMatcher(None, content1, content2).ratio()
                         return ratio >= similarity_threshold
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Text similarity comparison failed: {e}", exc_info=True)
         return False
 
 
@@ -737,19 +739,19 @@ class ScanFilters:
         # Check file type if filter is enabled
         if self.enabled_types or self.custom_extensions:
             ext = os.path.splitext(file_path)[1].lower()
-            
+
             # Check custom extensions first
-            if self.custom_extensions:
-                if ext in self.custom_extensions:
-                    return True
-            
+            if self.custom_extensions and ext in self.custom_extensions:
+                return True
+
             # Check category types
             if self.enabled_types:
                 for type_name in self.enabled_types:
                     if ext in self.FILE_TYPES.get(type_name, []):
                         return True
-                return False
-        
+
+            return False
+
         return True
 
 
@@ -985,15 +987,14 @@ class UndoManager:
     """Manages file backup and restore operations for undo functionality"""
     
     def __init__(self):
-        self.backup_dir = os.path.join(os.getcwd(), ".duplicate_finder_backup")
-        self.operations = []
+        self.backup_dir = os.path.join(os.path.expanduser('~'), '.duplicate_finder_backup')
         self.max_operations = 100
+        self.operations = collections.deque(maxlen=self.max_operations)
         self._ensure_backup_dir()
-        
+
     def _ensure_backup_dir(self):
         """Create backup directory if it doesn't exist"""
-        if not os.path.exists(self.backup_dir):
-            os.makedirs(self.backup_dir)
+        os.makedirs(self.backup_dir, exist_ok=True)
             
     def backup_file(self, file_path):
         """Backup a file before deletion"""
@@ -1012,17 +1013,17 @@ class UndoManager:
                 'timestamp': timestamp
             }
             
-            self.operations.append(operation)
-            
-            # Keep only last N operations
-            if len(self.operations) > self.max_operations:
-                old_op = self.operations.pop(0)
-                if os.path.exists(old_op['backup_path']):
+            # Clean up the oldest backup file before deque auto-evicts it
+            if len(self.operations) >= self.max_operations:
+                old_op = self.operations[0]
+                if old_op.get('backup_path') and os.path.exists(old_op['backup_path']):
                     try:
                         os.remove(old_op['backup_path'])
-                    except Exception:
-                        pass
-                    
+                    except Exception as e:
+                        logger.warning(f"Could not remove old backup {old_op.get('backup_path')}: {e}", exc_info=True)
+
+            self.operations.append(operation)
+
             return True
         except Exception as e:
             logger.error(f"Backup failed: {e}")
@@ -1039,8 +1040,6 @@ class UndoManager:
                 'timestamp': timestamp
             }
             self.operations.append(operation)
-            if len(self.operations) > self.max_operations:
-                self.operations.pop(0)
             return True
         except Exception as e:
             logger.error(f"Failed to record move: {e}")
@@ -1093,7 +1092,7 @@ class UndoManager:
         
     def get_recent_operations(self, limit=10):
         """Get recent operations for display"""
-        return self.operations[-limit:] if self.operations else []
+        return list(self.operations)[-limit:] if self.operations else []
     
     def get_undo_count(self):
         """Get number of available undo operations"""
@@ -1105,8 +1104,8 @@ class UndoManager:
             try:
                 if op.get('backup_path') and os.path.exists(op['backup_path']):
                     os.remove(op['backup_path'])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Could not remove backup {op.get('backup_path')}: {e}", exc_info=True)
         self.operations.clear()
 
 
@@ -1130,40 +1129,39 @@ def compute_perceptual_hash_worker(file_path):
         if ext not in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']:
             return (file_path, None)
         
-        img = Image.open(file_path)
-        
-        # GPU-accelerated perceptual hashing
-        if HAS_CUDA and CUDA_BACKEND == 'cupy':
-            # Use CuPy for GPU acceleration
-            img_gray = img.convert('L').resize((32, 32))
-            img_array = np.array(img_gray, dtype=np.float32)
-            gpu_array = cp.asarray(img_array)
-            
-            # GPU-based DCT approximation using FFT
-            fft_result = cp.fft.fft2(gpu_array)
-            dct_approx = cp.real(fft_result)[:8, :8]
-            median_val = cp.median(dct_approx)
-            binary_hash = (dct_approx > median_val).flatten()
-            hash_str = ''.join('1' if b else '0' for b in cp.asnumpy(binary_hash))
-            return (file_path, hash_str)
-            
-        elif HAS_CUDA and CUDA_BACKEND == 'torch':
-            # Use PyTorch CUDA for GPU acceleration
-            img_gray = img.convert('L').resize((32, 32))
-            img_array = np.array(img_gray, dtype=np.float32)
-            gpu_tensor = torch_module.from_numpy(img_array).cuda()
-            
-            # GPU-based FFT for DCT approximation
-            fft_result = torch_module.fft.fft2(gpu_tensor)
-            dct_approx = torch_module.real(fft_result)[:8, :8]
-            median_val = torch_module.median(dct_approx)
-            binary_hash = (dct_approx > median_val).flatten()
-            hash_str = ''.join('1' if b else '0' for b in binary_hash.cpu().numpy())
-            return (file_path, hash_str)
-        else:
-            # CPU fallback using imagehash
-            phash = imagehash.phash(img)
-            return (file_path, str(phash))
+        with Image.open(file_path) as img:
+            # GPU-accelerated perceptual hashing
+            if HAS_CUDA and CUDA_BACKEND == 'cupy':
+                # Use CuPy for GPU acceleration
+                img_gray = img.convert('L').resize((32, 32))
+                img_array = np.array(img_gray, dtype=np.float32)
+                gpu_array = cp.asarray(img_array)
+
+                # GPU-based DCT approximation using FFT
+                fft_result = cp.fft.fft2(gpu_array)
+                dct_approx = cp.real(fft_result)[:8, :8]
+                median_val = cp.median(dct_approx)
+                binary_hash = (dct_approx > median_val).flatten()
+                hash_str = ''.join('1' if b else '0' for b in cp.asnumpy(binary_hash))
+                return (file_path, hash_str)
+
+            elif HAS_CUDA and CUDA_BACKEND == 'torch':
+                # Use PyTorch CUDA for GPU acceleration
+                img_gray = img.convert('L').resize((32, 32))
+                img_array = np.array(img_gray, dtype=np.float32)
+                gpu_tensor = torch_module.from_numpy(img_array).cuda()
+
+                # GPU-based FFT for DCT approximation
+                fft_result = torch_module.fft.fft2(gpu_tensor)
+                dct_approx = torch_module.real(fft_result)[:8, :8]
+                median_val = torch_module.median(dct_approx)
+                binary_hash = (dct_approx > median_val).flatten()
+                hash_str = ''.join('1' if b else '0' for b in binary_hash.cpu().numpy())
+                return (file_path, hash_str)
+            else:
+                # CPU fallback using imagehash
+                phash = imagehash.phash(img)
+                return (file_path, str(phash))
             
     except Exception as e:
         return (file_path, None)
@@ -1216,7 +1214,8 @@ class GPUHasher:
                     results[path] = None
                     continue
                 
-                img = Image.open(path).convert('L').resize((32, 32))
+                with Image.open(path) as _src_img:
+                    img = _src_img.convert('L').resize((32, 32))
                 img_array = np.array(img, dtype=np.float32)
                 
                 if self.backend == 'cupy':
@@ -1276,8 +1275,8 @@ class GPUHasher:
                 if HAS_PILLOW:
                     ext = os.path.splitext(path)[1].lower()
                     if ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']:
-                        img = Image.open(path)
-                        phash = imagehash.phash(img)
+                        with Image.open(path) as img:
+                            phash = imagehash.phash(img)
                         results[path] = str(phash)
                     else:
                         results[path] = None
@@ -1295,8 +1294,8 @@ class GPUHasher:
                 mempool.free_all_blocks()
             elif self.backend == 'torch':
                 torch_module.cuda.empty_cache()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"GPU memory clear failed: {e}", exc_info=True)
 
 
 class EnhancedScanThread(QThread):
@@ -1535,8 +1534,8 @@ class EnhancedScanThread(QThread):
                             content = f.read()[:10000]  # Limit to first 10K chars
                             if content.strip():
                                 text_contents[path] = content
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Could not read text file {path}: {e}", exc_info=True)
                 
                 if text_contents:
                     # Compute embeddings in batch
@@ -1587,14 +1586,14 @@ class EnhancedScanThread(QThread):
             
             for future in as_completed(futures):
                 if self.is_cancelled:
-                    executor.shutdown(wait=False)
+                    executor.shutdown(wait=True, cancel_futures=True)
                     return file_hashes
-                
+
                 # Handle pause
                 while self.is_paused:
                     time.sleep(0.1)
                     if self.is_cancelled:
-                        executor.shutdown(wait=False)
+                        executor.shutdown(wait=True, cancel_futures=True)
                         return file_hashes
                 
                 try:
@@ -1658,20 +1657,9 @@ class EnhancedScanThread(QThread):
                 
             except Exception as e:
                 logger.error(f"Error processing {file_path}: {e}")
-        
-        duplicates = {k: v for k, v in file_hashes.items() if len(v) > 1}
-        
-        # Phase 2: Find similar files (not exact duplicates)
-        self.status_update.emit("Finding similar files...")
-        similar_files = {}
-        
-        if self.comparison_settings['find_similar']:
-            similar_files = self.find_similar_files(files, duplicates)
-        
-        self.progress.emit(100)
-        self.status_update.emit("Analysis complete!")
-        self.finished.emit(duplicates, similar_files)
-    
+
+        return file_hashes
+
     def compute_hash(self, file_path):
         try:
             profile = get_profile_for_path(file_path, self.media_profiles)
@@ -1707,8 +1695,8 @@ class EnhancedScanThread(QThread):
         ext = os.path.splitext(file_path)[1].lower()
         if ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif']:
             try:
-                img = Image.open(file_path)
-                return str(imagehash.phash(img))
+                with Image.open(file_path) as img:
+                    return str(imagehash.phash(img))
             except Exception:
                 return self.md5_hash(file_path)
         else:
@@ -1716,7 +1704,7 @@ class EnhancedScanThread(QThread):
     
     def find_similar_files(self, files, duplicates):
         """Find similar (but not identical) files"""
-        similar_files = defaultdict(list)
+        similar_files = {}
         
         # Get list of files that are not already exact duplicates
         duplicate_files = set()
@@ -1808,8 +1796,8 @@ class EnhancedScanThread(QThread):
                             if size1 != size2:
                                 is_similar = True
                                 similarity_reasons.append("Same name, different size")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Name/size comparison failed for {file1} vs {file2}: {e}", exc_info=True)
                 
                 if settings.get('compare_text_content', False):
                     if FileComparator.compare_text_similarity(file1, file2, settings.get('content_similarity', 0.9)):
@@ -2239,10 +2227,9 @@ class EnhancedDuplicateFinder(QMainWindow):
         saved_config = self.settings.value("enterprise_config", None)
         if saved_config:
             try:
-                import json
                 self.enterprise_config.update(json.loads(saved_config))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Could not load saved enterprise_config: {e}", exc_info=True)
         
         # Initialize undo manager
         self.undo_manager = UndoManager()
@@ -4125,9 +4112,9 @@ class EnhancedDuplicateFinder(QMainWindow):
             for file_path in files:
                 try:
                     total_size += os.path.getsize(file_path)
-                except Exception:
-                    pass
-            
+                except Exception as e:
+                    logger.warning(f"Could not get size for {file_path}: {e}", exc_info=True)
+
             group_item.setText(2, self.format_file_size(total_size))
             group_item.setData(0, Qt.ItemDataRole.UserRole, hash_val)
             
@@ -4187,7 +4174,6 @@ class EnhancedDuplicateFinder(QMainWindow):
             return
             
         hash_val = current.data(0, Qt.ItemDataRole.UserRole)
-        suggested_keep = current.data(1, Qt.ItemDataRole.UserRole)
         files = self.duplicates.get(hash_val, [])
         suggested_keep = self._suggest_file_to_keep(files)
         
@@ -4215,13 +4201,13 @@ class EnhancedDuplicateFinder(QMainWindow):
                     'path': file_path,
                     'name': os.path.basename(file_path),
                 'size': 0,
-                'mtime': 0,
+                'mtime': float('inf'),
                 'is_suggested': file_path == suggested_keep,
                 'type': quality_info.get("category", "other"),
                 'quality': quality_info.get("score", 0.0),
                 'details': quality_info.get("details", "N/A")
             })
-        
+
         # Sort: suggested keep first, then by modification time (oldest first)
         file_infos.sort(key=lambda x: (not x['is_suggested'], x['mtime']))
         
@@ -4248,7 +4234,7 @@ class EnhancedDuplicateFinder(QMainWindow):
             item.setText(6, self.format_file_size(info['size']))
             
             # Add modification date
-            if info['mtime'] > 0:
+            if info['mtime'] > 0 and info['mtime'] != float('inf'):
                 mod_date = datetime.fromtimestamp(info['mtime']).strftime('%Y-%m-%d %H:%M')
                 item.setText(7, mod_date)
             else:
@@ -4295,7 +4281,7 @@ class EnhancedDuplicateFinder(QMainWindow):
                     'path': file_path,
                     'name': os.path.basename(file_path),
                     'size': 0,
-                    'mtime': 0,
+                    'mtime': float('inf'),
                     'is_suggested': file_path == suggested_keep,
                     'type': quality_info.get("category", "other"),
                     'quality': quality_info.get("score", 0.0),
@@ -4327,7 +4313,7 @@ class EnhancedDuplicateFinder(QMainWindow):
             item.setText(6, self.format_file_size(info['size']))
             
             # Add modification date
-            if info['mtime'] > 0:
+            if info['mtime'] > 0 and info['mtime'] != float('inf'):
                 mod_date = datetime.fromtimestamp(info['mtime']).strftime('%Y-%m-%d %H:%M')
                 item.setText(7, mod_date)
             else:
@@ -4383,11 +4369,11 @@ class EnhancedDuplicateFinder(QMainWindow):
                 preview_text += "🖼️ Image file - Open in image viewer for preview"
                 if HAS_PILLOW:
                     try:
-                        img = Image.open(file_path)
-                        preview_text += f"\n📐 Dimensions: {img.size[0]} x {img.size[1]}"
-                        preview_text += f"\n🎨 Mode: {img.mode}"
-                    except Exception:
-                        pass
+                        with Image.open(file_path) as img:
+                            preview_text += f"\n📐 Dimensions: {img.size[0]} x {img.size[1]}"
+                            preview_text += f"\n🎨 Mode: {img.mode}"
+                    except Exception as e:
+                        logger.warning(f"Image preview failed for {file_path}: {e}", exc_info=True)
             
             # Video file info
             elif ext in ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv']:
@@ -4437,6 +4423,11 @@ class EnhancedDuplicateFinder(QMainWindow):
         info = self._get_quality_info(file_path)
         return info.get("score", 0.0)
 
+    def _invalidate_quality_cache(self, paths):
+        """Remove paths from the quality cache after deletion/move."""
+        for p in paths:
+            self._quality_cache.pop(p, None)
+
     def _get_quality_info(self, file_path):
         """Get quality score and display details for a file."""
         cached = self._quality_cache.get(file_path)
@@ -4463,12 +4454,14 @@ class EnhancedDuplicateFinder(QMainWindow):
                     details = f"{width}x{height}"
             elif category == "videos" and HAS_CV2:
                 cap = cv2.VideoCapture(file_path)
-                if cap.isOpened():
-                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    score = (width * height) / 1_000_000.0
-                    details = f"{width}x{height}"
-                cap.release()
+                try:
+                    if cap.isOpened():
+                        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        score = (width * height) / 1_000_000.0
+                        details = f"{width}x{height}"
+                finally:
+                    cap.release()
         except Exception:
             score = 0.0
             details = "N/A"
@@ -4633,8 +4626,8 @@ class EnhancedDuplicateFinder(QMainWindow):
                     files_to_delete.append(f)
                     try:
                         total_space_freed += os.path.getsize(f)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        logger.warning(f"Could not get size for {f}: {e}", exc_info=True)
         
         if not files_to_delete:
             QMessageBox.information(self, "Nothing to Delete", "No duplicate files to delete.")
@@ -4753,7 +4746,8 @@ class EnhancedDuplicateFinder(QMainWindow):
         
         deleted_count = 0
         failed_files = []
-        
+        deleted_paths = []
+
         # Use undo manager if enabled
         undo_enabled = self.enterprise_config.get("enable_undo", True)
         backed_up_count = 0
@@ -4775,7 +4769,10 @@ class EnhancedDuplicateFinder(QMainWindow):
                 # os.remove for long paths REQUIRED the prefix
                 
                 normalized_path = file_path.replace("\\\\?\\", "") if file_path.startswith("\\\\?\\") else file_path
-                prefixed_path = file_path if file_path.startswith("\\\\?\\") else f"\\\\?\\{os.path.abspath(file_path)}"
+                if os.name == 'nt':
+                    prefixed_path = file_path if file_path.startswith("\\\\?\\") else f"\\\\?\\{os.path.abspath(file_path)}"
+                else:
+                    prefixed_path = os.path.abspath(file_path)
                 
                 if use_recycle:
                     # For Recycle Bin: Try normalized first, then prefixed
@@ -4811,6 +4808,7 @@ class EnhancedDuplicateFinder(QMainWindow):
                 
                 if success:
                     deleted_count += 1
+                    deleted_paths.append(file_path)
                 elif last_error:
                     # Reraise the last error to be caught by the outer try/except
                     raise last_error
@@ -4834,13 +4832,17 @@ class EnhancedDuplicateFinder(QMainWindow):
                 (f"\n... and {len(failed_files)-10} more" if len(failed_files) > 10 else "")
             )
         
+        # Invalidate quality cache for deleted paths
+        if deleted_paths:
+            self._invalidate_quality_cache(deleted_paths)
+
         # Update undo state
         self._update_undo_state()
-        
+
         # Refresh the view
         self.refresh_current_view()
 
-    
+
     def show_bulk_move_preview(self):
         """Show preview dialog for bulk moving all duplicates (keeps one per group)"""
         if not self.duplicates:
@@ -4868,8 +4870,8 @@ class EnhancedDuplicateFinder(QMainWindow):
                 files_to_move.append(f)
                 try:
                     total_space_freed += os.path.getsize(f)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Could not get size for {f}: {e}", exc_info=True)
 
             group_plans.append({
                 "files": files,
@@ -5051,16 +5053,16 @@ class EnhancedDuplicateFinder(QMainWindow):
                 total_skipped += len(skipped_files)
                 continue
 
-            max_score = max(meta_map[f]['quality_score'] for f in valid_files)
+            max_score = max(meta_map[f].get('quality_score', 0) for f in valid_files)
             best_file = None
             for f in audio_files:
-                if f in valid_files and meta_map[f]['quality_score'] == max_score:
+                if f in valid_files and meta_map[f].get('quality_score', 0) == max_score:
                     best_file = f
                     break
             if best_file is None:
                 best_file = valid_files[0]
 
-            other_scores = [meta_map[f]['quality_score'] for f in valid_files if f != best_file]
+            other_scores = [meta_map[f].get('quality_score', 0) for f in valid_files if f != best_file]
             if other_scores:
                 improvement_scores.append(max_score - (sum(other_scores) / len(other_scores)))
             else:
@@ -5488,7 +5490,7 @@ class EnhancedDuplicateFinder(QMainWindow):
                     if HAS_SEND2TRASH:
                         send2trash(file_path)
                     else:
-                        os.remove(file_path)  # Fallback to permanent delete
+                        raise RuntimeError("send2trash not installed; refusing to permanently delete when recycle-bin requested")
                     deleted_count += 1
                 except Exception as e:
                     failed_files.append(f"{file_path}: {e}")
@@ -5682,8 +5684,8 @@ class EnhancedDuplicateFinder(QMainWindow):
 <body>
     <h1>🔍 Duplicate File Report</h1>
     <div class="summary">
-        <p><strong>📅 Scan Date:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        <p><strong>📁 Scanned Folder:</strong> {self.directory or "N/A"}</p>
+        <p><strong>📅 Scan Date:</strong> {html.escape(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</p>
+        <p><strong>📁 Scanned Folder:</strong> {html.escape(str(self.directory or "N/A"))}</p>
         <p><strong>📊 Duplicate Groups:</strong> {len(self.duplicates)}</p>
         <p><strong>🔗 Similar File Groups:</strong> {len(self.similar_files)}</p>
     </div>
@@ -5695,16 +5697,16 @@ class EnhancedDuplicateFinder(QMainWindow):
                     for i, (hash_val, files) in enumerate(self.duplicates.items()):
                         total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
                         html_content += f'    <div class="group">\n'
-                        html_content += f'        <h3>Group {i+1} ({len(files)} files, {self.format_file_size(total_size)} total)</h3>\n'
+                        html_content += f'        <h3>Group {i+1} ({len(files)} files, {html.escape(str(self.format_file_size(total_size)))} total)</h3>\n'
                         for file_path_item in files:
                             try:
                                 size = self.format_file_size(os.path.getsize(file_path_item))
                             except Exception:
                                 size = "Unknown"
                             html_content += f'        <div class="file">\n'
-                            html_content += f'            <strong>{os.path.basename(file_path_item)}</strong>\n'
-                            html_content += f'            <div class="file-path">{file_path_item}</div>\n'
-                            html_content += f'            <div class="file-size">Size: {size}</div>\n'
+                            html_content += f'            <strong>{html.escape(str(os.path.basename(file_path_item)))}</strong>\n'
+                            html_content += f'            <div class="file-path">{html.escape(str(file_path_item))}</div>\n'
+                            html_content += f'            <div class="file-size">Size: {html.escape(str(size))}</div>\n'
                             html_content += f'        </div>\n'
                         html_content += '    </div>\n'
                 
@@ -5716,16 +5718,16 @@ class EnhancedDuplicateFinder(QMainWindow):
                         files = group_data.get("files", [])
                         html_content += f'    <div class="group">\n'
                         html_content += f'        <h3>Group {i+1} ({len(files)} files)</h3>\n'
-                        html_content += f'        <p class="reasons">Similarity: {reasons}</p>\n'
+                        html_content += f'        <p class="reasons">Similarity: {html.escape(str(reasons))}</p>\n'
                         for file_path_item in files:
                             try:
                                 size = self.format_file_size(os.path.getsize(file_path_item))
                             except Exception:
                                 size = "Unknown"
                             html_content += f'        <div class="file similar">\n'
-                            html_content += f'            <strong>{os.path.basename(file_path_item)}</strong>\n'
-                            html_content += f'            <div class="file-path">{file_path_item}</div>\n'
-                            html_content += f'            <div class="file-size">Size: {size}</div>\n'
+                            html_content += f'            <strong>{html.escape(str(os.path.basename(file_path_item)))}</strong>\n'
+                            html_content += f'            <div class="file-path">{html.escape(str(file_path_item))}</div>\n'
+                            html_content += f'            <div class="file-size">Size: {html.escape(str(size))}</div>\n'
                             html_content += f'        </div>\n'
                         html_content += '    </div>\n'
                 
@@ -5760,7 +5762,6 @@ class EnhancedDuplicateFinder(QMainWindow):
             self.enterprise_config.update(dialog.get_config())
             
             # Save to settings
-            import json
             self.settings.setValue("enterprise_config", json.dumps(self.enterprise_config))
             
             # Update undo manager
@@ -5838,13 +5839,29 @@ Confidence: {analysis.get('confidence', 0):.1%}
                 
                 # Restore duplicates
                 self.duplicates = session_data.get('duplicates', {})
-                
+                if not isinstance(self.duplicates, dict) or not all(
+                    isinstance(k, str) and isinstance(v, list)
+                    for k, v in self.duplicates.items()
+                ):
+                    QMessageBox.critical(
+                        self, "Import Error",
+                        "Invalid session file: 'duplicates' must be a dict of {str: list}."
+                    )
+                    self.duplicates = {}
+                    return
+
                 # Restore similar files
                 self.similar_files = session_data.get('similar_files', {})
-                
+
                 # Restore directory if available
                 if 'directory' in session_data:
                     self.directory = session_data['directory']
+                    if not self.directory or not os.path.isdir(self.directory):
+                        QMessageBox.warning(
+                            self, "Directory Missing",
+                            f"Imported session references a directory that no longer exists:\n{self.directory}"
+                        )
+                        return
                     self.dir_label.setText(f"📁 {self.directory}")
                     self.scan_btn.setEnabled(True)
                     self.scan_action.setEnabled(True)
@@ -6030,7 +6047,6 @@ Confidence: {analysis.get('confidence', 0):.1%}
             self.settings.setValue("last_directory", self.directory)
         
         # Save enterprise config
-        import json
         self.settings.setValue("enterprise_config", json.dumps(self.enterprise_config))
         self.settings.setValue("media_profiles", json.dumps(self.get_media_profiles_from_ui()))
         

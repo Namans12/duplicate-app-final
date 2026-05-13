@@ -3,12 +3,13 @@
 Database Manager for Persistent Scan Results
 Handles SQLite database operations for incremental scanning
 """
+import contextlib
 import json
 import os
 import sqlite3
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -30,7 +31,7 @@ class DatabaseManager:
 
     def init_database(self):
         """Initialize database tables."""
-        with self._lock, self._connect() as conn:
+        with self._lock, contextlib.closing(self._connect()) as conn:
             cursor = conn.cursor()
 
             cursor.execute(
@@ -81,6 +82,7 @@ class DatabaseManager:
                     algorithm_used TEXT NOT NULL,
                     similarity_score REAL,
                     created_time REAL NOT NULL,
+                    UNIQUE(session_id, group_hash),
                     FOREIGN KEY (session_id) REFERENCES scan_sessions (session_id)
                 )
                 """
@@ -103,13 +105,14 @@ class DatabaseManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_modification_time ON file_cache(modification_time)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_directory ON scan_sessions(directory_path)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_hash ON duplicate_groups(group_hash)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_dg_session ON duplicate_groups(session_id)")
             conn.commit()
 
     def start_scan_session(self, directory: str, algorithm: str, filters: Dict) -> str:
         """Start a new scan session."""
         session_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex}"
 
-        with self._lock, self._connect() as conn:
+        with self._lock, contextlib.closing(self._connect()) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -125,7 +128,7 @@ class DatabaseManager:
 
     def end_scan_session(self, session_id: str, total_files: int, new_files: int, modified_files: int):
         """Mark scan session as completed."""
-        with self._lock, self._connect() as conn:
+        with self._lock, contextlib.closing(self._connect()) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -145,12 +148,12 @@ class DatabaseManager:
         current_size = os.path.getsize(file_path)
         current_mtime = os.path.getmtime(file_path)
 
-        with self._lock, self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT * FROM file_cache
-                WHERE file_path = ? AND file_size = ? AND modification_time = ?
+                WHERE file_path = ? AND file_size = ? AND ABS(modification_time - ?) < 0.001
                 """,
                 (file_path, current_size, current_mtime),
             )
@@ -176,7 +179,7 @@ class DatabaseManager:
         file_size = os.path.getsize(file_path)
         modification_time = os.path.getmtime(file_path)
 
-        with self._lock, self._connect() as conn:
+        with self._lock, contextlib.closing(self._connect()) as conn:
             cursor = conn.cursor()
 
             text_embedding = None
@@ -212,14 +215,14 @@ class DatabaseManager:
 
     def save_duplicate_groups(self, session_id: str, duplicates: Dict, algorithm: str):
         """Save duplicate groups to database."""
-        with self._lock, self._connect() as conn:
+        with self._lock, contextlib.closing(self._connect()) as conn:
             cursor = conn.cursor()
 
             for group_hash, file_paths in duplicates.items():
                 if len(file_paths) > 1:
                     cursor.execute(
                         """
-                        INSERT INTO duplicate_groups
+                        INSERT OR IGNORE INTO duplicate_groups
                         (session_id, group_hash, file_paths, algorithm_used, created_time)
                         VALUES (?, ?, ?, ?, ?)
                         """,
@@ -235,7 +238,7 @@ class DatabaseManager:
 
     def get_scan_history(self, directory: Optional[str] = None, limit: int = 10) -> List[Dict]:
         """Get scan history for a directory or all scans."""
-        with self._lock, self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn:
             cursor = conn.cursor()
 
             if directory:
@@ -265,11 +268,11 @@ class DatabaseManager:
         modified_files = []
         all_files = []
 
-        for root, dirs, files in os.walk(directory):
+        for root, dirs, files in os.walk(directory, onerror=lambda e: print(f"walk error: {e}")):
             for file_name in files:
                 all_files.append(os.path.join(root, file_name))
 
-        with self._lock, self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn:
             cursor = conn.cursor()
 
             for file_path in all_files:
@@ -299,7 +302,7 @@ class DatabaseManager:
         """Clean up cache entries older than specified days."""
         cutoff_time = datetime.now().timestamp() - (days * 24 * 60 * 60)
 
-        with self._lock, self._connect() as conn:
+        with self._lock, contextlib.closing(self._connect()) as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM file_cache WHERE scan_timestamp < ?", (cutoff_time,))
             cursor.execute("DELETE FROM scan_sessions WHERE start_time < ?", (cutoff_time,))
@@ -309,11 +312,17 @@ class DatabaseManager:
                 WHERE session_id NOT IN (SELECT session_id FROM scan_sessions)
                 """
             )
+            cursor.execute(
+                """
+                DELETE FROM performance_metrics
+                WHERE session_id NOT IN (SELECT session_id FROM scan_sessions)
+                """
+            )
             conn.commit()
 
     def get_database_stats(self) -> Dict[str, Any]:
         """Get database statistics."""
-        with self._lock, self._connect() as conn:
+        with contextlib.closing(self._connect()) as conn:
             cursor = conn.cursor()
             stats: Dict[str, Any] = {}
 
@@ -340,7 +349,7 @@ class DatabaseManager:
             latest = cursor.fetchone()
             if latest:
                 stats["latest_scan_directory"] = latest[0]
-                stats["latest_scan_time"] = datetime.fromtimestamp(latest[1])
+                stats["latest_scan_time"] = datetime.fromtimestamp(latest[1], tz=timezone.utc)
 
         return stats
 
@@ -366,7 +375,7 @@ class DatabaseManager:
 
     def record_performance_metric(self, session_id: str, metric_name: str, metric_value: float):
         """Record a performance metric."""
-        with self._lock, self._connect() as conn:
+        with self._lock, contextlib.closing(self._connect()) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """

@@ -3,6 +3,7 @@
 Plugin System for Custom Algorithms and File Type Support
 Extensible architecture for user-created plugins
 """
+import hashlib
 import os
 import sys
 import importlib.util
@@ -115,19 +116,55 @@ class SimilarityPlugin(PluginInterface):
 class PluginManager:
     """Manages loading and execution of plugins"""
     
-    def __init__(self, plugin_directory: str = "plugins"):
-        self.plugin_directory = Path(plugin_directory)
+    def __init__(self, plugin_directory: Optional[str] = None):
+        # Resolve the plugin directory relative to this module so the manager
+        # works regardless of the caller's current working directory.
+        if plugin_directory is None:
+            self.plugin_directory = Path(__file__).resolve().parent / "plugins"
+        else:
+            candidate = Path(plugin_directory)
+            if not candidate.is_absolute():
+                candidate = Path(__file__).resolve().parent / candidate
+            self.plugin_directory = candidate
         self.plugin_directory.mkdir(exist_ok=True)
-        
+
         self.hashing_plugins: Dict[str, HashingPlugin] = {}
         self.file_type_plugins: Dict[str, FileTypePlugin] = {}
         self.similarity_plugins: Dict[str, SimilarityPlugin] = {}
-        
+
         self.plugin_configs: Dict[str, Dict] = {}
         self.plugin_errors: List[Dict] = []
-        
+
+        # Security gate: load only allowlisted plugin filenames unless the
+        # user has explicitly disabled the check in plugin_config.json.
+        self.security_check: bool = True
+        self.enabled_plugins: set = set()
+
         self._create_plugin_structure()
+        self._load_security_config()
         self.load_all_plugins()
+
+    def _load_security_config(self):
+        """Read plugin_config.json and populate the security allowlist."""
+        config_file = self.plugin_directory / "plugin_config.json"
+        try:
+            with open(config_file, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except FileNotFoundError:
+            # No config -> conservative defaults: security on, empty allowlist.
+            self.security_check = True
+            self.enabled_plugins = set()
+            return
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(f"Could not parse plugin_config.json ({e}); enforcing security defaults")
+            self.security_check = True
+            self.enabled_plugins = set()
+            return
+
+        # Default to True if the key is missing.
+        self.security_check = bool(config.get("security_check", True))
+        self.enabled_plugins = set(config.get("enabled_plugins", []) or [])
+        self.plugin_configs = config.get("plugin_settings", {}) or {}
         
     def _create_plugin_structure(self):
         """Create plugin directory structure"""
@@ -403,17 +440,63 @@ def create_plugin():
             logger.warning(f"⚠️ {len(self.plugin_errors)} plugin loading errors")
             
     def _load_plugins_from_directory(self, directory: Path, plugin_dict: Dict, base_class):
-        """Load plugins from a specific directory"""
+        """Load plugins from a specific directory.
+
+        Security:
+          * Symlinks that resolve outside the plugin directory are skipped.
+          * When `security_check` is enabled, only filenames listed in
+            `enabled_plugins` are executed. This blocks arbitrary .py files
+            dropped into plugins/ from being auto-executed (RCE protection).
+        """
+        try:
+            directory_resolved = directory.resolve()
+        except OSError as e:
+            logger.warning(f"Cannot resolve plugin directory {directory}: {e}")
+            return
+
         for plugin_file in directory.glob("*.py"):
             if plugin_file.name.startswith("_"):
                 continue
-                
+
+            # Reject symlinks (and any path) whose resolved target escapes
+            # the plugin directory tree.
+            try:
+                resolved = plugin_file.resolve()
+            except OSError as e:
+                logger.warning(f"  ⚠️ Skipping {plugin_file.name}: cannot resolve ({e})")
+                continue
+            try:
+                resolved.relative_to(directory_resolved)
+            except ValueError:
+                logger.warning(
+                    f"  ⚠️ Skipping {plugin_file.name}: symlink target escapes plugin dir"
+                )
+                continue
+            if plugin_file.is_symlink():
+                logger.warning(
+                    f"  ⚠️ Skipping {plugin_file.name}: symlinks not permitted"
+                )
+                continue
+
+            # Security allowlist gate.
+            if self.security_check and plugin_file.name not in self.enabled_plugins:
+                logger.info(
+                    f"  ⏭️ Skipping {plugin_file.name}: not in enabled_plugins allowlist "
+                    f"(set security_check=false in plugin_config.json to disable)"
+                )
+                continue
+
             try:
                 plugin = self._load_plugin_file(plugin_file, base_class)
                 if plugin:
+                    if plugin.name in plugin_dict:
+                        logger.warning(
+                            f"  ⚠️ Overwriting existing plugin '{plugin.name}' "
+                            f"with definition from {plugin_file.name}"
+                        )
                     plugin_dict[plugin.name] = plugin
                     logger.info(f"  ✅ Loaded {plugin.name} v{plugin.version}")
-                    
+
             except Exception as e:
                 error_info = {
                     "file": str(plugin_file),
@@ -438,11 +521,16 @@ def create_plugin():
             if isinstance(plugin_instance, base_class):
                 return plugin_instance
                 
-        # Look for plugin classes
+        # Look for plugin classes that are *defined* in this module — not
+        # base classes or other plugin types imported from plugin_system.
         for name, obj in inspect.getmembers(module, inspect.isclass):
-            if issubclass(obj, base_class) and obj != base_class:
+            if (
+                obj.__module__ == module.__name__
+                and issubclass(obj, base_class)
+                and obj is not base_class
+            ):
                 return obj()
-                
+
         return None
         
     def get_available_plugins(self) -> Dict[str, List[Dict[str, str]]]:
@@ -526,7 +614,7 @@ def create_plugin():
         
         for plugin_name, plugin in self.file_type_plugins.items():
             ext = os.path.splitext(file_path)[1].lower()
-            if ext in plugin.supported_extensions:
+            if hasattr(plugin, 'supported_extensions') and ext in plugin.supported_extensions:
                 try:
                     features = plugin.extract_features(file_path)
                     if features:
@@ -562,27 +650,71 @@ def create_plugin():
         return self.plugin_errors.copy()
         
     def install_plugin(self, plugin_file_path: str, plugin_type: str) -> bool:
-        """Install a new plugin"""
+        """Install a new plugin.
+
+        Refuses to follow symlinks or to silently overwrite an existing
+        plugin file. Logs the SHA256 of the source for audit trails.
+        """
         try:
             source_path = Path(plugin_file_path)
             if not source_path.exists():
+                logger.error(f"Plugin install failed: source not found: {source_path}")
                 return False
-                
+
+            # Reject symlinked sources to avoid TOCTOU / path-escape attacks.
+            if source_path.is_symlink():
+                logger.error(
+                    f"Plugin install refused: source is a symlink ({source_path})"
+                )
+                return False
+
             target_dir = self.plugin_directory / plugin_type
+            target_dir.mkdir(parents=True, exist_ok=True)
             target_path = target_dir / source_path.name
-            
+
+            # Never silently overwrite an existing plugin.
+            if target_path.exists():
+                logger.error(
+                    f"Plugin install refused: target already exists ({target_path}); "
+                    f"remove the existing file first"
+                )
+                return False
+
+            # Compute and log SHA256 of the source before copying.
+            sha = hashlib.sha256()
+            with open(source_path, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    sha.update(chunk)
+            digest = sha.hexdigest()
+            logger.info(f"Installing plugin {source_path.name} (sha256={digest})")
+
             # Copy plugin file
             import shutil
             shutil.copy2(source_path, target_path)
-            
+
             # Reload plugins
             self.reload_plugins()
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Plugin installation failed: {e}")
             return False
 
-# Global plugin manager instance
-plugin_manager = PluginManager()
+# Lazy global plugin manager — do not run plugin discovery on import.
+_plugin_manager: Optional[PluginManager] = None
+
+
+def get_plugin_manager() -> PluginManager:
+    """Return the process-wide PluginManager, constructing it on first use."""
+    global _plugin_manager
+    if _plugin_manager is None:
+        _plugin_manager = PluginManager()
+    return _plugin_manager
+
+
+def __getattr__(name):
+    """Backwards-compat shim: `from plugin_system import plugin_manager`."""
+    if name == "plugin_manager":
+        return get_plugin_manager()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

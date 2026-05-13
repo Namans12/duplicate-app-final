@@ -58,12 +58,17 @@ class StreamingHasher:
         """Hash file using streaming chunks"""
         try:
             with open(file_path, 'rb') as f:
+                chunk_idx = 0
+                yield_every = 256  # yield once every ~2MB (256 * 8KB) instead of every chunk
+                on_worker = threading.current_thread() != threading.main_thread()
                 while chunk := f.read(self.chunk_size):
                     hasher.update(chunk)
-                    # Yield control periodically for responsiveness
-                    if threading.current_thread() != threading.main_thread():
-                        time.sleep(0.001)  # 1ms yield
-                        
+                    chunk_idx += 1
+                    # Yield control periodically (worker threads only) to keep
+                    # the UI responsive without paying a sleep on every read.
+                    if on_worker and chunk_idx % yield_every == 0:
+                        time.sleep(0.0001)
+
             return hasher.hexdigest()
             
         except Exception as e:
@@ -427,7 +432,40 @@ class IncrementalScanner:
         
         return estimates
 
-# Global instances
-streaming_hasher = StreamingHasher()
-memory_manager = MemoryManager()
-incremental_scanner = IncrementalScanner()
+# Lazy singletons: avoid eager construction at import time. Existing callers
+# that do ``from memory_optimizer import streaming_hasher`` still work via
+# PEP 562 module ``__getattr__`` below.
+_streaming_hasher_instance = None
+_memory_manager_instance = None
+_incremental_scanner_instance = None
+
+
+def get_streaming_hasher() -> 'StreamingHasher':
+    global _streaming_hasher_instance
+    if _streaming_hasher_instance is None:
+        _streaming_hasher_instance = StreamingHasher()
+    return _streaming_hasher_instance
+
+
+def get_memory_manager() -> 'MemoryManager':
+    global _memory_manager_instance
+    if _memory_manager_instance is None:
+        _memory_manager_instance = MemoryManager()
+    return _memory_manager_instance
+
+
+def get_incremental_scanner() -> 'IncrementalScanner':
+    global _incremental_scanner_instance
+    if _incremental_scanner_instance is None:
+        _incremental_scanner_instance = IncrementalScanner()
+    return _incremental_scanner_instance
+
+
+def __getattr__(name):
+    if name == 'streaming_hasher':
+        return get_streaming_hasher()
+    if name == 'memory_manager':
+        return get_memory_manager()
+    if name == 'incremental_scanner':
+        return get_incremental_scanner()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -4,7 +4,9 @@ Intelligent Duplicate Merging System
 Auto-suggests merging similar files with difference highlighting
 """
 import os
+import copy
 import difflib
+import functools
 import shutil
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
@@ -93,32 +95,52 @@ class FileMerger:
             "similarity_matrix": {},
             "merge_suggestions": []
         }
-        
+
         try:
             file_contents = {}
             file_lines = {}
-            
+            file_decode_errors = {}
+
             # Read all files
+            READ_CAP = 1 * 1024 * 1024  # 1MB cap for similarity reading
             for file_path in files:
                 try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                        file_contents[file_path] = content
-                        file_lines[file_path] = content.splitlines()
+                    fsize = os.path.getsize(file_path)
+                    with open(file_path, 'rb') as f:
+                        raw = f.read(READ_CAP) if fsize > READ_CAP else f.read()
+                    decoded = raw.decode('utf-8', errors='replace')
+                    had_errors = '�' in decoded
+                    file_contents[file_path] = decoded
+                    file_lines[file_path] = decoded.splitlines()
+                    file_decode_errors[file_path] = had_errors
                 except Exception as e:
                     print(f"Error reading {file_path}: {e}")
                     continue
+            analysis["_decode_errors"] = file_decode_errors
                     
             if len(file_contents) < 2:
                 return analysis
                 
             # Calculate similarities and differences
             file_list = list(file_contents.keys())
+            LARGE_FILE_THRESHOLD = 5 * 1024 * 1024  # 5MB
             for i, file1 in enumerate(file_list):
                 for j, file2 in enumerate(file_list[i+1:], i+1):
-                    similarity = self._calculate_text_similarity(
-                        file_lines[file1], file_lines[file2]
-                    )
+                    try:
+                        size1 = os.path.getsize(file1)
+                        size2 = os.path.getsize(file2)
+                    except OSError:
+                        size1 = size2 = 0
+                    if size1 > LARGE_FILE_THRESHOLD or size2 > LARGE_FILE_THRESHOLD:
+                        size_sim = 1 - abs(size1 - size2) / max(size1, size2, 1)
+                        lc1 = len(file_lines[file1])
+                        lc2 = len(file_lines[file2])
+                        line_sim = 1 - abs(lc1 - lc2) / max(lc1, lc2, 1)
+                        similarity = (size_sim + line_sim) / 2
+                    else:
+                        similarity = self._calculate_text_similarity(
+                            file_lines[file1], file_lines[file2]
+                        )
                     analysis["similarity_matrix"][f"{os.path.basename(file1)}_vs_{os.path.basename(file2)}"] = similarity
                     
                     if similarity > 0.8:  # High similarity
@@ -214,9 +236,9 @@ class FileMerger:
     def _create_merge_preview(self, file1: str, file2: str, diff_info: Dict) -> str:
         """Create a preview of what the merged file would look like"""
         try:
-            with open(file1, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(file1, 'r', encoding='utf-8', errors='replace') as f:
                 content1 = f.read()
-            with open(file2, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(file2, 'r', encoding='utf-8', errors='replace') as f:
                 content2 = f.read()
                 
             # Simple merge strategy: use newer file as base and add conflict markers
@@ -296,7 +318,7 @@ class FileMerger:
                             "type": "image_quality_merge",
                             "files": [file1, file2],
                             "description": "Same dimensions, different file sizes - possible quality difference",
-                            "recommended_action": "keep_larger" if info1["file_size"] > info2["file_size"] else "keep_larger",
+                            "recommended_action": "keep_file1" if info1["file_size"] > info2["file_size"] else "keep_file2",
                             "confidence": 0.8
                         }
                         analysis["merge_suggestions"].append(suggestion)
@@ -359,35 +381,36 @@ class FileMerger:
             
         return analysis
         
+    def _structure_signature(self, obj: Any, path: tuple = ()) -> set:
+        sig = set()
+        if isinstance(obj, dict):
+            sig.add((path, 'dict'))
+            for k, v in obj.items():
+                sig |= self._structure_signature(v, path + (('key', k),))
+        elif isinstance(obj, list):
+            sig.add((path, 'list'))
+            for idx, v in enumerate(obj):
+                sig |= self._structure_signature(v, path + (('idx', idx),))
+        else:
+            sig.add((path, type(obj).__name__))
+        return sig
+
     def _compare_json_structure(self, data1: Any, data2: Any) -> float:
         """Compare structural similarity of JSON data"""
         try:
-            def get_structure(obj, path=""):
-                if isinstance(obj, dict):
-                    return {f"{path}.{k}" if path else k: get_structure(v, f"{path}.{k}" if path else k) 
-                           for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return f"list[{len(obj)}]"
-                else:
-                    return type(obj).__name__
-                    
-            struct1 = get_structure(data1)
-            struct2 = get_structure(data2)
-            
-            # Convert to sets of keys for comparison
-            keys1 = set(str(struct1).split())
-            keys2 = set(str(struct2).split())
-            
-            if not keys1 and not keys2:
+            sig1 = self._structure_signature(data1)
+            sig2 = self._structure_signature(data2)
+
+            if not sig1 and not sig2:
                 return 1.0
-            if not keys1 or not keys2:
+            if not sig1 or not sig2:
                 return 0.0
-                
-            intersection = len(keys1 & keys2)
-            union = len(keys1 | keys2)
-            
+
+            intersection = len(sig1 & sig2)
+            union = len(sig1 | sig2)
+
             return intersection / union if union > 0 else 0.0
-            
+
         except Exception:
             return 0.0
             
@@ -491,54 +514,83 @@ class FileMerger:
     def _execute_text_merge(self, suggestion: Dict, output_path: Optional[str] = None) -> Dict[str, Any]:
         """Execute text file merge"""
         result = {"success": False, "backup_files": []}
-        
+
         try:
             primary_file = suggestion["primary_file"]
             secondary_file = suggestion["secondary_file"]
-            
-            # Create backups
-            backup_dir = os.path.join(os.path.dirname(primary_file), ".merge_backups")
+
+            backup_dir = os.path.join(os.path.expanduser('~'), '.duplicate_finder_merge_backups')
             os.makedirs(backup_dir, exist_ok=True)
-            
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup1 = os.path.join(backup_dir, f"{os.path.basename(primary_file)}.{timestamp}.backup")
             backup2 = os.path.join(backup_dir, f"{os.path.basename(secondary_file)}.{timestamp}.backup")
-            
+
             shutil.copy2(primary_file, backup1)
             shutil.copy2(secondary_file, backup2)
             result["backup_files"] = [backup1, backup2]
-            
-            # Determine output file
-            if output_path is None:
-                output_path = primary_file
-            
-            assert output_path is not None  # Type hint for mypy
-                
+
+            # Check inputs for decode errors before any write
+            had_decode_errors = False
+            for fp in (primary_file, secondary_file):
+                try:
+                    with open(fp, 'rb') as f:
+                        if '�' in f.read().decode('utf-8', errors='replace'):
+                            had_decode_errors = True
+                            break
+                except Exception:
+                    pass
+
             # Execute merge based on strategy
             strategy = suggestion.get("merge_strategy", "manual_review")
-            
+
             if strategy == "auto_merge_newer":
+                # Avoid writing the conflict-preview over the original
+                if output_path is None or output_path == primary_file:
+                    output_path = primary_file + '.merged'
+                    print(f"Writing merged output to: {output_path}")
+
+                if had_decode_errors:
+                    raise ValueError("Source file had decode errors; refusing to write merge result")
+
                 # Keep the newer file
                 file1_mtime = os.path.getmtime(primary_file)
                 file2_mtime = os.path.getmtime(secondary_file)
-                
-                if file1_mtime > file2_mtime:
-                    shutil.copy2(primary_file, output_path)
-                else:
-                    shutil.copy2(secondary_file, output_path)
-                    
+
+                src = primary_file if file1_mtime > file2_mtime else secondary_file
+                if os.path.abspath(src) == os.path.abspath(output_path):
+                    result["success"] = True
+                    result["output_file"] = output_path
+                    return result
+                try:
+                    shutil.copy2(src, output_path)
+                except shutil.SameFileError:
+                    pass
+
             elif strategy == "merge_with_comments":
-                # Create merged file with conflict markers
-                merged_content = suggestion.get("preview", "")
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(merged_content)
-                    
+                preview = suggestion.get("preview")
+                if not preview:
+                    raise ValueError("Empty preview; cannot write merge_with_comments output")
+                if had_decode_errors:
+                    raise ValueError("Source file had decode errors; refusing to write merge result")
+                # Always write to a sibling, never the original
+                conflict_path = (output_path + '.merge_conflict') if output_path else (primary_file + '.merge_conflict.txt')
+                if conflict_path == primary_file or conflict_path == secondary_file:
+                    conflict_path = primary_file + '.merge_conflict.txt'
+                with open(conflict_path, 'w', encoding='utf-8') as f:
+                    f.write(preview)
+                output_path = conflict_path
+                print(f"Wrote conflict-marker preview to: {conflict_path}")
+            else:
+                if output_path is None:
+                    raise ValueError("output_path required")
+
             result["success"] = True
             result["output_file"] = output_path
-            
+
         except Exception as e:
             result["error"] = str(e)
-            
+
         return result
         
     def _execute_image_merge(self, suggestion: Dict, output_path: Optional[str] = None) -> Dict[str, Any]:
@@ -552,12 +604,16 @@ class FileMerger:
             best_file = max(files, key=lambda f: os.path.getsize(f))
             
             if output_path is None:
-                output_path = best_file
-            
-            assert output_path is not None  # Type hint for mypy
-                
+                raise ValueError("output_path required")
+
             if output_path != best_file:
-                shutil.copy2(best_file, output_path)
+                if os.path.abspath(best_file) == os.path.abspath(output_path):
+                    pass
+                else:
+                    try:
+                        shutil.copy2(best_file, output_path)
+                    except shutil.SameFileError:
+                        pass
                 
             result["success"] = True
             result["output_file"] = output_path
@@ -577,19 +633,25 @@ class FileMerger:
             
             # Load JSON data
             json_objects = []
+            had_decode_errors = False
             for file_path in files:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    json_objects.append(json.load(f))
-                    
+                with open(file_path, 'rb') as f:
+                    raw = f.read()
+                decoded = raw.decode('utf-8', errors='replace')
+                if '�' in decoded:
+                    had_decode_errors = True
+                json_objects.append(json.loads(decoded))
+
             # Deep merge JSON objects
             merged_data = self._deep_merge_json(json_objects)
-            
+
             # Determine output file
             if output_path is None:
-                output_path = files[0]
-            
-            assert output_path is not None  # Type hint for mypy
-                
+                raise ValueError("output_path required")
+
+            if had_decode_errors:
+                raise ValueError("Source file had decode errors; refusing to write merge result")
+
             # Write merged JSON
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(merged_data, f, indent=2, ensure_ascii=False)
@@ -607,7 +669,7 @@ class FileMerger:
         if not json_objects:
             return {}
             
-        result = json_objects[0].copy() if isinstance(json_objects[0], dict) else json_objects[0]
+        result = copy.deepcopy(json_objects[0])
         
         for obj in json_objects[1:]:
             if isinstance(result, dict) and isinstance(obj, dict):
@@ -623,5 +685,6 @@ class FileMerger:
                         
         return result
 
-# Global file merger instance
-file_merger = FileMerger()
+@functools.lru_cache(maxsize=1)
+def get_file_merger() -> FileMerger:
+    return FileMerger()

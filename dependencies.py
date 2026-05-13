@@ -9,11 +9,7 @@ import logging
 import multiprocessing
 from typing import Optional, Any
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Module logger (library code should not configure the root logger)
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -279,12 +275,37 @@ def detect_gpu_backend() -> tuple:
     return "cpu", False
 
 
-# Initialize GPU backend on module load
-CUDA_BACKEND, HAS_CUDA = detect_gpu_backend()
+# Lazy GPU backend detection — avoid running CUDA probes at import time.
+_gpu_backend_cache: Optional[tuple] = None
+
+
+def get_gpu_backend() -> tuple:
+    """
+    Return (CUDA_BACKEND, HAS_CUDA), running detection at most once.
+    """
+    global _gpu_backend_cache, CUDA_BACKEND, HAS_CUDA
+    if _gpu_backend_cache is None:
+        backend, has_cuda = detect_gpu_backend()
+        # detect_gpu_backend() already sets module globals; cache the pair.
+        _gpu_backend_cache = (backend, has_cuda)
+    return _gpu_backend_cache
+
+
+def __getattr__(name):
+    """
+    Lazy module-attribute resolver so `from dependencies import HAS_CUDA`
+    and `dependencies.CUDA_BACKEND` still work without eagerly probing GPU
+    at import time.
+    """
+    if name in ("HAS_CUDA", "CUDA_BACKEND"):
+        backend, has_cuda = get_gpu_backend()
+        return has_cuda if name == "HAS_CUDA" else backend
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def get_dependency_summary() -> dict:
     """Get a summary of all dependency availability."""
+    backend, has_cuda = get_gpu_backend()
     return {
         "pillow": HAS_PILLOW,
         "imagehash": HAS_IMAGEHASH,
@@ -296,6 +317,6 @@ def get_dependency_summary() -> dict:
         "chromaprint": HAS_CHROMAPRINT,
         "librosa": HAS_LIBROSA,
         "soundfile": HAS_SOUNDFILE,
-        "cuda": HAS_CUDA,
-        "cuda_backend": CUDA_BACKEND,
+        "cuda": has_cuda,
+        "cuda_backend": backend,
     }

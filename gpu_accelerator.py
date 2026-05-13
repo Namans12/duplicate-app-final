@@ -26,7 +26,11 @@ def safe_print(*args, **kwargs):
         builtins.print(safe_text, end=end)
 
 
-print = safe_print
+# NOTE: We intentionally shadow the builtin ``print`` with ``safe_print`` at
+# module scope so existing call sites get UTF-8-safe behavior on Windows
+# consoles without touching dozens of call sites. Local code that needs the
+# real builtin can use ``builtins.print``.
+print = safe_print  # noqa: A001  (deliberate builtin shadow)
 
 # Suppress common audio processing warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='librosa')
@@ -263,7 +267,7 @@ def get_similarity_level(hash1: str, hash2: str) -> Tuple[str, int]:
 
 def detect_gpu_backend() -> Tuple[str, bool]:
     """Detect available GPU acceleration backend with proper error handling."""
-    global cp, torch, HAS_CUDA, BACKEND
+    global cp, torch
     
     # Try CuPy first (preferred for numerical operations)
     try:
@@ -293,7 +297,7 @@ def detect_gpu_backend() -> Tuple[str, bool]:
             device_name = _torch.cuda.get_device_name(0)
             print(f"[GPU] ✅ PyTorch CUDA backend available: {device_count} device(s), {device_name}")
             torch = _torch
-            return "pytorch", True
+            return "torch", True
         else:
             print("[GPU] ⚠️ PyTorch installed but CUDA not available")
     except ImportError:
@@ -657,17 +661,31 @@ class GPUAccelerator:
     def _compute_phash_batch_torch(self, batch_cpu: np.ndarray) -> List[str]:
         """
         Compute pHash for batch using PyTorch CUDA with true GPU parallelism.
-        
-        Uses torch.fft for DCT approximation since torch doesn't have native DCT.
+
+        Implements DCT-II via matrix multiplication so the result matches the
+        CuPy DCT semantics (rather than using FFT which is not equivalent).
         """
         import torch as _torch
-        
+        import math
+
         # Single host→device transfer
-        batch_gpu = _torch.from_numpy(batch_cpu).cuda()
-        
-        # 2D FFT as DCT approximation
-        fft_result = _torch.fft.fft2(batch_gpu)
-        dct_approx = _torch.real(fft_result)[:, :self.DCT_LOW_FREQ, :self.DCT_LOW_FREQ]
+        batch_gpu = _torch.from_numpy(batch_cpu).cuda().float()
+        N = batch_gpu.shape[-1]
+
+        # Build DCT-II orthonormal basis matrix on GPU once
+        # D[k, n] = alpha(k) * cos(pi * (2n + 1) * k / (2N))
+        device = batch_gpu.device
+        n_idx = _torch.arange(N, device=device, dtype=_torch.float32).unsqueeze(0)  # (1, N)
+        k_idx = _torch.arange(N, device=device, dtype=_torch.float32).unsqueeze(1)  # (N, 1)
+        D = _torch.cos(math.pi * (2.0 * n_idx + 1.0) * k_idx / (2.0 * N))
+        alpha = _torch.full((N,), math.sqrt(2.0 / N), device=device, dtype=_torch.float32)
+        alpha[0] = math.sqrt(1.0 / N)
+        D = D * alpha.unsqueeze(1)  # (N, N)
+
+        # Apply 2D DCT-II: D @ X @ D.T
+        # batch_gpu shape: (B, N, N)
+        dct_2d = _torch.matmul(D, _torch.matmul(batch_gpu, D.t()))
+        dct_approx = dct_2d[:, :self.DCT_LOW_FREQ, :self.DCT_LOW_FREQ]
         
         # Vectorized thresholding
         dct_flat = dct_approx.reshape(dct_approx.shape[0], -1)
@@ -767,14 +785,16 @@ class GPUAccelerator:
             for hash_str in hashes:
                 if hash_str:
                     # Handle both hex (16 char) and binary (64 char) formats
+                    # Both branches produce MSB-first bit arrays (index 0 = highest bit)
                     if len(hash_str) == 16:
-                        # Hex format - convert to binary
+                        # Hex format - convert to binary (MSB-first)
                         try:
                             int_val = int(hash_str, 16)
                             binary = [(int_val >> i) & 1 for i in range(63, -1, -1)]
                         except ValueError:
                             binary = [0] * 64
                     else:
+                        # Binary string - assumed MSB-first (first char = highest bit)
                         binary = [1 if c == '1' else 0 for c in hash_str[:64]]
                         while len(binary) < 64:
                             binary.append(0)
@@ -1304,22 +1324,31 @@ class VideoFingerprinter:
             return [fingerprint]
     
     def _compare_multi_hash(
-        self, 
-        hashes1: List[str], 
+        self,
+        hashes1: List[str],
         hashes2: List[str],
-        threshold: int
+        threshold: int,
+        match_ratio_threshold: float = 0.6,
     ) -> Tuple[bool, float, Dict[str, Any]]:
         """
         Compare multi-hash fingerprints (keyframe sequences).
-        
+
         Uses a sliding window approach to handle slight timing differences.
         """
+        # Detect format mismatch: one is keyframe sequence, other is XOR-style single hash
+        if (len(hashes1) > 1) != (len(hashes2) > 1):
+            return False, 0.0, {
+                "error": "fingerprint format mismatch",
+                "avg_hamming_distance": 64,
+                "method": "multi_hash",
+            }
+
         n1, n2 = len(hashes1), len(hashes2)
-        
+
         if n1 != n2:
             # Different number of keyframes - use best match approach
             pass
-        
+
         # Compute pairwise distances
         distances = []
         for i, h1 in enumerate(hashes1):
@@ -1329,17 +1358,17 @@ class VideoFingerprinter:
                 if dist < best_dist:
                     best_dist = dist
             distances.append(best_dist)
-        
+
         # Average distance across keyframes
         avg_distance = sum(distances) / len(distances) if distances else 64
         similarity = 1.0 - (avg_distance / 64.0)
-        
+
         # Count how many keyframes are within threshold
         matching_frames = sum(1 for d in distances if d <= threshold)
         match_ratio = matching_frames / len(distances) if distances else 0
-        
+
         # Videos are similar if majority of keyframes match
-        is_similar = match_ratio >= 0.6  # 60% of keyframes must match
+        is_similar = match_ratio >= match_ratio_threshold
         
         return is_similar, similarity, {
             "avg_hamming_distance": avg_distance,
@@ -1432,16 +1461,34 @@ HAS_CHROMAPRINT = False
 HAS_LIBROSA = False
 HAS_SOUNDFILE = False
 
-# Try to find fpcalc in project directory before importing acoustid
+# Try to find fpcalc in project directory before importing acoustid (cross-platform)
+import shutil as _shutil
 _project_dir = os.path.dirname(os.path.abspath(__file__))
-_fpcalc_dirs = [
-    os.path.join(_project_dir, 'chromaprint-fpcalc-1.5.1-windows-x86_64'),
-    _project_dir,
-]
-for _dir in _fpcalc_dirs:
-    _fpcalc = os.path.join(_dir, 'fpcalc.exe')
-    if os.path.exists(_fpcalc):
-        os.environ['PATH'] = _dir + os.pathsep + os.environ.get('PATH', '')
+
+# 1) Canonical detection: trust PATH first via shutil.which
+_fpcalc_found = _shutil.which('fpcalc')
+if _fpcalc_found:
+    _fpcalc_dir = os.path.dirname(_fpcalc_found)
+    if _fpcalc_dir:
+        os.environ['PATH'] = _fpcalc_dir + os.pathsep + os.environ.get('PATH', '')
+else:
+    # 2) Fall back to common install locations across OSes
+    _fpcalc_dirs = [
+        os.path.join(_project_dir, 'chromaprint-fpcalc-1.5.1-windows-x86_64'),
+        _project_dir,
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
+        '/usr/bin',
+    ]
+    _fpcalc_names = ['fpcalc', 'fpcalc.exe']
+    for _dir in _fpcalc_dirs:
+        for _name in _fpcalc_names:
+            _fpcalc = os.path.join(_dir, _name)
+            if os.path.exists(_fpcalc):
+                os.environ['PATH'] = _dir + os.pathsep + os.environ.get('PATH', '')
+                break
+        else:
+            continue
         break
 
 try:
@@ -1457,23 +1504,32 @@ try:
     
     def _silent_fingerprint_file(path, maxlength=120):
         """Wrapper to suppress fpcalc stderr (mpg123 errors)"""
+        old_stderr = sys.stderr
+        devnull_f = None
         try:
-            # Save original stderr
-            old_stderr = sys.stderr
-            
+            # Open devnull and redirect stderr first
+            devnull_f = open(_os_module.devnull, 'w')
+            sys.stderr = devnull_f
             try:
-                # Redirect stderr to null during fpcalc execution
-                sys.stderr = open(_os_module.devnull, 'w')
-                result = _original_fingerprint_file(path, maxlength)
-                return result
+                return _original_fingerprint_file(path, maxlength)
             finally:
-                # Restore stderr
-                if sys.stderr != old_stderr:
-                    sys.stderr.close()
+                # Always restore stderr BEFORE closing devnull,
+                # so a close failure can't leave stderr dangling.
                 sys.stderr = old_stderr
-                
+                try:
+                    devnull_f.close()
+                except Exception:
+                    pass
         except Exception:
             # Silently ignore fpcalc failures (corrupted audio)
+            # Ensure stderr is restored if an exception happened during setup
+            if sys.stderr is not old_stderr:
+                sys.stderr = old_stderr
+            if devnull_f is not None:
+                try:
+                    devnull_f.close()
+                except Exception:
+                    pass
             return None, None
     
     # Apply the patch
@@ -1726,26 +1782,34 @@ class AudioFingerprinter:
         - DCT for cepstral coefficients
         """
         try:
-            # Transfer audio to GPU
-            y_gpu = cp.asarray(y)
-            
-            # Compute STFT on GPU
-            # Using librosa's STFT but with GPU arrays where possible
-            # Note: librosa doesn't directly support CuPy, so we do hybrid
-            
-            # For now, use librosa on CPU for STFT (complex operation)
-            # and GPU for mel filterbank + DCT
-            stft = librosa.stft(
-                y, 
-                n_fft=self.MFCC_N_FFT, 
-                hop_length=self.MFCC_HOP_LENGTH
-            )
-            
-            # Magnitude spectrum
-            S = np.abs(stft) ** 2
-            
-            # Transfer to GPU for mel filterbank
-            S_gpu = cp.asarray(S)
+            # Compute STFT magnitude. Prefer CuPy's FFT if available; otherwise
+            # fall back to librosa on CPU. We avoid pre-allocating y_gpu unless
+            # we actually use it.
+            if cp is not None:
+                y_gpu = cp.asarray(y)
+                n_fft = self.MFCC_N_FFT
+                hop = self.MFCC_HOP_LENGTH
+
+                # Frame the signal manually for CuPy rfft (centered, reflect-pad like librosa default)
+                pad = n_fft // 2
+                y_padded = cp.pad(y_gpu, pad, mode='reflect')
+                num_frames = 1 + (y_padded.shape[0] - n_fft) // hop
+                # Build strided frames
+                frame_indices = cp.arange(n_fft)[None, :] + cp.arange(num_frames)[:, None] * hop
+                frames = y_padded[frame_indices]  # shape (num_frames, n_fft)
+                window = cp.hanning(n_fft).astype(frames.dtype)
+                frames = frames * window[None, :]
+                stft_mag = cp.abs(cp.fft.rfft(frames, n=n_fft, axis=1)).T  # (n_fft/2+1, num_frames)
+                S_gpu = stft_mag ** 2
+            else:
+                stft = librosa.stft(
+                    y,
+                    n_fft=self.MFCC_N_FFT,
+                    hop_length=self.MFCC_HOP_LENGTH,
+                )
+                S = np.abs(stft) ** 2
+                # Cannot reach mel filterbank on GPU without cp; fall through with numpy
+                S_gpu = S
             
             # Create mel filterbank on GPU
             n_mels = 128
@@ -1760,7 +1824,7 @@ class AudioFingerprinter:
             mel_spec_gpu = cp.dot(mel_basis_gpu, S_gpu)
             
             # Log mel spectrogram
-            mel_spec_gpu = cp.log(mel_spec_gpu + 1e-10)
+            mel_spec_gpu = cp.log(cp.maximum(mel_spec_gpu, 1e-10))
             
             # DCT on GPU to get MFCCs
             try:
@@ -1970,7 +2034,7 @@ class AudioFingerprinter:
                 return 0.0
             
             # Cosine similarity (fingerprints should already be normalized)
-            if self.cuda_available and BACKEND == 'cupy' and len(mfcc1) > 100:
+            if self.cuda_available and BACKEND == 'cupy' and len(mfcc1) > 16:
                 # GPU for large batches
                 m1_gpu = cp.asarray(mfcc1)
                 m2_gpu = cp.asarray(mfcc2)
@@ -2062,8 +2126,16 @@ class AudioFingerprinter:
         }
 
 
-# Global audio fingerprinter instance
-audio_fingerprinter = AudioFingerprinter()
+# Lazy audio fingerprinter singleton
+_audio_fingerprinter_instance = None
+
+
+def get_audio_fingerprinter() -> 'AudioFingerprinter':
+    """Return the process-wide AudioFingerprinter, creating it on first use."""
+    global _audio_fingerprinter_instance
+    if _audio_fingerprinter_instance is None:
+        _audio_fingerprinter_instance = AudioFingerprinter()
+    return _audio_fingerprinter_instance
 
 
 # =============================================================================
@@ -2446,10 +2518,55 @@ def get_acceleration_summary() -> str:
         return f"✅ Partial GPU acceleration ({gpu_count} GPU, {cpu_count} CPU)"
 
 
-# Global instances
-gpu_accelerator = GPUAccelerator()
-video_fingerprinter = VideoFingerprinter(gpu_accelerator)
-semantic_engine = SemanticSimilarityEngine()
+# Lazy module-level singletons. The previous module-level instantiation
+# triggered GPU init at import time; consumers now go through these getters.
+_gpu_accelerator_instance = None
+_video_fingerprinter_instance = None
+_semantic_engine_instance = None
 
-# Print pipeline status on module load
-print_pipeline_status()
+
+def get_gpu_accelerator() -> 'GPUAccelerator':
+    """Return the process-wide GPUAccelerator, creating it on first use."""
+    global _gpu_accelerator_instance
+    if _gpu_accelerator_instance is None:
+        _gpu_accelerator_instance = GPUAccelerator()
+    return _gpu_accelerator_instance
+
+
+def get_video_fingerprinter() -> 'VideoFingerprinter':
+    """Return the process-wide VideoFingerprinter, creating it on first use."""
+    global _video_fingerprinter_instance
+    if _video_fingerprinter_instance is None:
+        _video_fingerprinter_instance = VideoFingerprinter(get_gpu_accelerator())
+    return _video_fingerprinter_instance
+
+
+def get_semantic_engine() -> 'SemanticSimilarityEngine':
+    """Return the process-wide SemanticSimilarityEngine, creating it on first use."""
+    global _semantic_engine_instance
+    if _semantic_engine_instance is None:
+        _semantic_engine_instance = SemanticSimilarityEngine()
+    return _semantic_engine_instance
+
+
+def __getattr__(name):
+    """PEP 562 lazy module attribute access.
+
+    Preserves backwards compatibility for callers that do
+    ``from gpu_accelerator import gpu_accelerator`` while avoiding eager
+    GPU/model initialization at import time.
+    """
+    if name == 'gpu_accelerator':
+        return get_gpu_accelerator()
+    if name == 'video_fingerprinter':
+        return get_video_fingerprinter()
+    if name == 'semantic_engine':
+        return get_semantic_engine()
+    if name == 'audio_fingerprinter':
+        return get_audio_fingerprinter()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+if __name__ == '__main__':
+    # Print pipeline status only when run directly, not on import.
+    print_pipeline_status()

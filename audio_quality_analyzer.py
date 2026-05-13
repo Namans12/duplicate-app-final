@@ -108,7 +108,10 @@ class AudioQualityAnalyzer:
         format_score = format_weight * 40.0
         bitrate_score = float(metadata.get('bitrate_kbps') or 0.0) * 0.15
         sample_rate_score = float(metadata.get('sample_rate_hz') or 0.0) * 0.0005
-        size_score = float(metadata.get('file_size_mb') or 0.0) * 0.5
+        # Cap size contribution so a huge low-quality file (e.g. 2GB MP3) cannot
+        # out-score a smaller lossless file (e.g. 30MB FLAC). Format and bitrate
+        # should dominate the score.
+        size_score = min(float(metadata.get('file_size_mb') or 0.0) * 0.5, 50.0)
 
         return format_score + bitrate_score + sample_rate_score + size_score
 

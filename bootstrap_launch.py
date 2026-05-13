@@ -11,6 +11,11 @@ def main() -> int:
         return 1
 
     script = sys.argv[1]
+    # Resolve relative script names against this launcher's directory, not CWD.
+    if not os.path.isabs(script):
+        candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), script)
+        if os.path.exists(candidate):
+            script = candidate
     if not os.path.exists(script):
         print(f"Script not found: {script}")
         return 1

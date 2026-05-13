@@ -40,7 +40,11 @@ class ExampleHashPlugin(HashingPlugin):
         """Custom hash combining file size and content sample"""
         try:
             file_size = os.path.getsize(file_path)
-            
+
+            # Empty files: nothing to hash with this scheme.
+            if file_size == 0:
+                return ""
+
             # Read first and last 1024 bytes
             with open(file_path, 'rb') as f:
                 start_bytes = f.read(1024)
