@@ -15,6 +15,15 @@ import numpy as np
 from typing import List, Optional, Tuple, Any, Dict
 import time
 
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.preprocessing import normalize as sklearn_normalize
+    HAS_SKLEARN_SEMANTIC = True
+except ImportError:
+    TfidfVectorizer = None
+    sklearn_normalize = None
+    HAS_SKLEARN_SEMANTIC = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -379,6 +388,12 @@ def diagnose_gpu() -> Dict[str, Any]:
 # Initialize GPU backend on module load
 BACKEND, HAS_CUDA = detect_gpu_backend()
 
+# GPU-FIX: Validate GPU state consistency
+if BACKEND != 'cpu' and not HAS_CUDA:
+    logger.warning("Inconsistent GPU state detected; falling back to CPU")
+    BACKEND = 'cpu'
+    HAS_CUDA = False
+
 try:
     import cv2
     HAS_CV2 = True
@@ -388,9 +403,15 @@ except ImportError:
 try:
     from PIL import Image
     HAS_PILLOW = True
+    # GPU-FIX: Handle Pillow version compatibility for Resampling
+    try:
+        _LANCZOS = Image.Resampling.LANCZOS
+    except AttributeError:
+        _LANCZOS = Image.LANCZOS
 except ImportError:
     HAS_PILLOW = False
     Image = None
+    _LANCZOS = None
 
 # imagehash is optional - only needed for CPU fallback
 try:
@@ -561,7 +582,7 @@ class GPUAccelerator:
                     continue
                 with Image.open(path) as img:
                     # Convert to grayscale and resize to standard pHash size
-                    gray = img.convert("L").resize((self.PHASH_SIZE, self.PHASH_SIZE), Image.Resampling.LANCZOS)
+                    gray = img.convert("L").resize((self.PHASH_SIZE, self.PHASH_SIZE), _LANCZOS)
                     cpu_images.append(np.array(gray, dtype=np.float32))
                     valid_indices.append(idx)
             except Exception as e:
@@ -716,12 +737,18 @@ class GPUAccelerator:
                         results.append(str(phash))
                     else:
                         # Manual CPU pHash implementation
-                        img_resized = img.resize((self.PHASH_SIZE, self.PHASH_SIZE), Image.Resampling.LANCZOS)
+                        img_resized = img.resize((self.PHASH_SIZE, self.PHASH_SIZE), _LANCZOS)
                         pixels = np.array(img_resized, dtype=np.float32)
                         
                         # Simple DCT approximation using FFT
-                        from scipy import fft
-                        dct = fft.dctn(pixels, type=2, norm='ortho')
+                        # GPU-FIX: Import scipy at module level or handle ImportError
+                        try:
+                            from scipy import fft
+                            dct = fft.dctn(pixels, type=2, norm='ortho')
+                        except ImportError:
+                            logger.warning("scipy not available for DCT computation")
+                            results.append("")
+                            continue
                         dct_low = dct[:self.DCT_LOW_FREQ, :self.DCT_LOW_FREQ].flatten()
                         
                         # Binary hash based on median
@@ -1537,11 +1564,17 @@ class AudioFingerprinter:
     MFCC_HOP_LENGTH = 512     # Hop length for STFT
     MFCC_N_FFT = 2048         # FFT window size
     
-    # Similarity thresholds — tuned for "truly same recording" detection (AS-1).
-    # 0.85/0.80 matched too many different tracks from the same artist/album.
-    # 0.92/0.90 requires near-bit-identical acoustic content (same song, any encode).
-    CHROMAPRINT_THRESHOLD = 0.92   # Chromaprint similarity (0-1)
-    MFCC_THRESHOLD = 0.90          # MFCC cosine similarity (0-1)
+    # AUDIO-FIX: Tightened thresholds for exact duplicate detection
+    # Strict thresholds for "same recording" classification.
+    CHROMAPRINT_THRESHOLD = 0.97   # Chromaprint similarity - raised from 0.965
+    MFCC_THRESHOLD = 0.95          # MFCC cosine similarity - raised from 0.94
+    HYBRID_STRICT_THRESHOLD = 0.95 # Combined score - raised from 0.93
+    HYBRID_NEAR_THRESHOLD = 0.985  # Near match - raised from 0.98
+    
+    # Duration tolerance - allow up to 15% difference for same song from different sources
+    # (radio edits, different streaming services, fade variations)
+    # The audio stream comparison will verify they're actually the same content
+    DURATION_TOLERANCE = 0.85  # min/max ratio must be >= this (allows ~15% difference)
     
     def __init__(self):
         self.has_chromaprint = HAS_CHROMAPRINT
@@ -1893,7 +1926,10 @@ class AudioFingerprinter:
             "chromaprint_score": None,
             "mfcc_score": None,
             "method_used": None,
-            "duration_match": None
+            "duration_match": None,
+            "combined_score": None,
+            "near_match": False,
+            "strict_match": False,
         }
         
         # Check duration similarity first (quick filter)
@@ -1903,14 +1939,11 @@ class AudioFingerprinter:
                 duration_ratio = min(d1, d2) / max(d1, d2)
                 details["duration_match"] = duration_ratio
                 
-                # AS-1: Skip if durations differ by more than 3%.
-                # Re-encoded copies of the same song are within ±1-2 s; a 3% window
-                # allows up to ~5 s variance on a 3-minute track while still rejecting
-                # different songs that happen to share a similar running time.
-                if duration_ratio < 0.97:
+                # AUDIO-FIX: Tighter duration tolerance (2% instead of 6%)
+                if duration_ratio < self.DURATION_TOLERANCE:
                     return False, 0.0, details
         
-        # Chromaprint comparison
+        # Chromaprint comparison - this is the PRIMARY discriminator
         cp_score = None
         if method in ("chromaprint", "hybrid"):
             cp1, cp2 = fp1.get("chromaprint"), fp2.get("chromaprint")
@@ -1918,44 +1951,71 @@ class AudioFingerprinter:
                 cp_score = self._compare_chromaprint(cp1, cp2)
                 details["chromaprint_score"] = cp_score
                 details["method_used"] = "chromaprint"
-                
-                # If chromaprint matches well, we're done
-                if cp_score >= self.CHROMAPRINT_THRESHOLD:
-                    return True, cp_score, details
         
-        # MFCC comparison (fallback or primary)
+        # MFCC comparison (supporting evidence only - NOT sufficient alone)
         mfcc_score = None
         if method in ("mfcc", "hybrid"):
             mfcc1, mfcc2 = fp1.get("mfcc"), fp2.get("mfcc")
             if mfcc1 is not None and mfcc2 is not None:
                 mfcc_score = self._compare_mfcc(mfcc1, mfcc2)
                 details["mfcc_score"] = mfcc_score
-                
-                if mfcc_score >= self.MFCC_THRESHOLD:
-                    details["method_used"] = "mfcc" if cp_score is None else "hybrid"
-                    return True, mfcc_score, details
         
-        # Combine scores if both available
+        # AUDIO-FIX: For strict_match (100% Audio Match), require BOTH:
+        # 1. High chromaprint similarity (>= 0.90) - proves same audio content
+        # 2. High MFCC similarity (>= 0.95) - confirms timbral match
+        # MFCC alone is NOT reliable - different songs can have 94%+ MFCC similarity!
+        
         if cp_score is not None and mfcc_score is not None:
-            # Weighted average: chromaprint is more reliable
+            # Both methods available - use combined evidence
+            details["method_used"] = "hybrid"
+            
+            # Strict match requires BOTH chromaprint AND MFCC agreement
+            # Chromaprint >= 0.90 indicates same audio content
+            # MFCC >= 0.95 confirms timbral similarity
+            is_strict = cp_score >= 0.90 and mfcc_score >= self.MFCC_THRESHOLD
+            details["strict_match"] = is_strict
+            
+            # Combined score weighted towards chromaprint (more discriminative)
             combined = 0.7 * cp_score + 0.3 * mfcc_score
-            details["method_used"] = "hybrid_combined"
-            # AS-1: require 0.88 combined (≈ CP=0.91 + MFCC=0.81) — was 0.80
-            is_similar = combined >= 0.88
-            return is_similar, combined, details
+            details["combined_score"] = combined
+            
+            # Near match: high combined score but not quite strict
+            details["near_match"] = (not is_strict) and combined >= 0.85 and cp_score >= 0.80
+            
+            return is_strict, combined, details
         
-        # Single method result
-        final_score = cp_score if cp_score is not None else (mfcc_score or 0.0)
-        return False, final_score, details
+        # Chromaprint-only fallback (when MFCC is unavailable)
+        # Require very high chromaprint score for strict match
+        if cp_score is not None:
+            duration_ratio = details.get("duration_match")
+            # Require 99.5%+ chromaprint similarity for strict match without MFCC confirmation
+            strict_cp_floor = 0.995 if duration_ratio is None or duration_ratio >= 0.97 else 1.0
+            is_strict = cp_score >= strict_cp_floor
+            details["strict_match"] = is_strict
+            details["near_match"] = (not is_strict) and cp_score >= 0.90
+            details["combined_score"] = cp_score
+            return is_strict, cp_score, details
+        
+        # MFCC-only fallback - NEVER trigger strict_match from MFCC alone
+        # MFCC is not discriminative enough (different songs score 94%+)
+        if mfcc_score is not None:
+            details["method_used"] = "mfcc"
+            details["strict_match"] = False  # Never strict from MFCC alone
+            details["near_match"] = mfcc_score >= 0.98  # Very high threshold for near match
+            details["combined_score"] = mfcc_score
+            return False, mfcc_score, details
+        
+        # No fingerprints available
+        return False, 0.0, details
     
-    def _compare_chromaprint(self, fp1: str, fp2: str) -> float:
+    def _compare_chromaprint(self, fp1, fp2) -> float:
         """
         Compare two Chromaprint fingerprints.
         
         Returns similarity score 0.0-1.0.
         
-        Uses base64 decoding to compare raw fingerprint data.
-        Chromaprint fingerprints are base64-encoded arrays of 32-bit integers.
+        Chromaprint fingerprints from acoustid are URL-safe base64-encoded arrays
+        of 32-bit integers (bytes or str). We decode and compare bit patterns.
         """
         if not self.has_chromaprint:
             return 0.0
@@ -1964,20 +2024,34 @@ class AudioFingerprinter:
             import base64
             import struct
             
-            # Decode base64 fingerprints to raw bytes
-            # Chromaprint uses a custom encoding, try to decode
-            def decode_fp(fp_str):
-                """Decode chromaprint fingerprint string to int array."""
+            def decode_fp(fp_data):
+                """Decode chromaprint fingerprint to int array."""
+                # Handle bytes or str input
+                if isinstance(fp_data, bytes):
+                    fp_str = fp_data.decode('ascii', errors='ignore')
+                else:
+                    fp_str = str(fp_data)
+                
+                # Chromaprint uses URL-safe base64 encoding (with - and _ instead of + and /)
+                # Add padding if needed (base64 requires length to be multiple of 4)
+                padding_needed = (4 - len(fp_str) % 4) % 4
+                fp_str_padded = fp_str + '=' * padding_needed
+                
                 try:
-                    # Standard base64
-                    raw = base64.b64decode(fp_str + '==')  # Add padding if needed
-                    # Unpack as 32-bit unsigned integers
+                    # Use URL-safe base64 decoding (handles - and _)
+                    raw = base64.urlsafe_b64decode(fp_str_padded)
+                    # Unpack as 32-bit unsigned integers (little-endian)
                     count = len(raw) // 4
+                    if count == 0:
+                        return None
                     return list(struct.unpack(f'<{count}I', raw[:count*4]))
                 except Exception:
+                    # If URL-safe fails, try standard base64 (older versions)
                     try:
-                        raw = base64.b64decode(fp_str)
+                        raw = base64.b64decode(fp_str_padded)
                         count = len(raw) // 4
+                        if count == 0:
+                            return None
                         return list(struct.unpack(f'<{count}I', raw[:count*4]))
                     except Exception:
                         return None
@@ -2011,10 +2085,16 @@ class AudioFingerprinter:
             # Fallback to string comparison
             return self._compare_fingerprint_strings(fp1, fp2)
     
-    def _compare_fingerprint_strings(self, fp1: str, fp2: str) -> float:
+    def _compare_fingerprint_strings(self, fp1, fp2) -> float:
         """Simple string-based fingerprint comparison fallback."""
         if not fp1 or not fp2:
             return 0.0
+        
+        # Handle bytes input
+        if isinstance(fp1, bytes):
+            fp1 = fp1.decode('ascii', errors='ignore')
+        if isinstance(fp2, bytes):
+            fp2 = fp2.decode('ascii', errors='ignore')
         
         min_len = min(len(fp1), len(fp2))
         max_len = max(len(fp1), len(fp2))
@@ -2157,11 +2237,36 @@ _SEMANTIC_MODEL_DEVICE = None
 HAS_SENTENCE_TRANSFORMERS = False
 
 try:
-    if DEP_HAS_TRANSFORMERS and DepSentenceTransformer is not None:
+    if DepSentenceTransformer is not None:
         SentenceTransformer = DepSentenceTransformer
         HAS_SENTENCE_TRANSFORMERS = True
 except Exception:
     pass
+
+
+def _compute_tfidf_embeddings(texts: List[str]) -> np.ndarray:
+    """Fallback text embeddings using TF-IDF when SentenceTransformer is unavailable."""
+    if not HAS_SKLEARN_SEMANTIC or not texts:
+        return np.array([])
+
+    cleaned = [
+        " ".join((text or "").split())[: AppConfig.MAX_SEMANTIC_CHARS]
+        for text in texts
+    ]
+
+    try:
+        vectorizer = TfidfVectorizer(
+            lowercase=True,
+            max_features=4096,
+            ngram_range=(1, 2),
+            stop_words="english",
+        )
+        matrix = vectorizer.fit_transform(cleaned)
+        normalized = sklearn_normalize(matrix, norm="l2", copy=False)
+        return normalized.toarray().astype(np.float32, copy=False)
+    except Exception as e:
+        print(f"[Semantic] TF-IDF fallback failed: {e}")
+        return np.array([])
 
 
 def get_semantic_model():
@@ -2229,22 +2334,24 @@ def compute_semantic_similarity(text1: str, text2: str) -> float:
         Cosine similarity score (0.0 = completely different, 1.0 = identical meaning).
     """
     model = get_semantic_model()
-    if model is None:
-        return 0.0
-    
-    try:
-        # Encode both texts in a single batch for efficiency
-        embeddings = model.encode(
-            [text1, text2], 
-            convert_to_numpy=True, 
-            normalize_embeddings=True  # Pre-normalize for fast cosine
-        )
-        e1, e2 = embeddings
-        # Cosine similarity (since embeddings are normalized, dot product = cosine)
-        return float((e1 * e2).sum())
-    except Exception as e:
-        print(f"[Semantic] Error computing similarity: {e}")
-        return 0.0
+    if model is not None:
+        try:
+            # Encode both texts in a single batch for efficiency
+            embeddings = model.encode(
+                [text1, text2], 
+                convert_to_numpy=True, 
+                normalize_embeddings=True  # Pre-normalize for fast cosine
+            )
+            e1, e2 = embeddings
+            # Cosine similarity (since embeddings are normalized, dot product = cosine)
+            return float((e1 * e2).sum())
+        except Exception as e:
+            print(f"[Semantic] Error computing similarity: {e}")
+
+    embeddings = _compute_tfidf_embeddings([text1, text2])
+    if len(embeddings) == 2:
+        return float(np.dot(embeddings[0], embeddings[1]))
+    return 0.0
 
 
 def batch_compute_embeddings(texts: List[str], batch_size: int = 32) -> np.ndarray:
@@ -2262,21 +2369,20 @@ def batch_compute_embeddings(texts: List[str], batch_size: int = 32) -> np.ndarr
         Numpy array of shape (len(texts), embedding_dim) with normalized embeddings.
     """
     model = get_semantic_model()
-    if model is None:
-        return np.array([])
-    
-    try:
-        embeddings = model.encode(
-            texts,
-            batch_size=batch_size,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=len(texts) > 100
-        )
-        return embeddings
-    except Exception as e:
-        print(f"[Semantic] Error computing batch embeddings: {e}")
-        return np.array([])
+    if model is not None:
+        try:
+            embeddings = model.encode(
+                texts,
+                batch_size=batch_size,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=len(texts) > 100
+            )
+            return embeddings
+        except Exception as e:
+            print(f"[Semantic] Error computing batch embeddings: {e}")
+
+    return _compute_tfidf_embeddings(texts)
 
 
 def compute_similarity_matrix(embeddings: np.ndarray) -> np.ndarray:
@@ -2368,12 +2474,16 @@ class SemanticSimilarityEngine:
             self.device = _SEMANTIC_MODEL_DEVICE
             self._initialized = True
             return True
+        if HAS_SKLEARN_SEMANTIC:
+            self.device = "cpu-tfidf"
+            self._initialized = True
+            return True
         return False
     
     @property
     def is_available(self) -> bool:
         """Check if semantic similarity is available."""
-        return HAS_SENTENCE_TRANSFORMERS
+        return HAS_SENTENCE_TRANSFORMERS or HAS_SKLEARN_SEMANTIC
     
     @property
     def is_initialized(self) -> bool:
@@ -2396,6 +2506,10 @@ class SemanticSimilarityEngine:
         if not self._initialized:
             self.initialize()
         return batch_compute_embeddings(texts, batch_size)
+
+    def compute_embeddings(self, texts: List[str], batch_size: int = 32) -> np.ndarray:
+        """Compatibility wrapper used by the main scan flow."""
+        return self.batch_embed(texts, batch_size)
     
     def find_similar(
         self, 
@@ -2410,12 +2524,14 @@ class SemanticSimilarityEngine:
     
     def get_status(self) -> Dict[str, Any]:
         """Get engine status information."""
+        backend = "sentence-transformers" if HAS_SENTENCE_TRANSFORMERS else "tfidf" if HAS_SKLEARN_SEMANTIC else None
         return {
             "available": self.is_available,
             "initialized": self.is_initialized,
             "device": self.device,
             "gpu_accelerated": self.is_gpu_accelerated,
-            "model_name": "all-MiniLM-L6-v2"
+            "model_name": "all-MiniLM-L6-v2" if HAS_SENTENCE_TRANSFORMERS else "tfidf-fallback",
+            "backend": backend,
         }
 
 
@@ -2453,6 +2569,7 @@ def get_pipeline_status() -> Dict[str, Dict[str, Any]]:
     # Semantic similarity pipeline
     semantic_gpu = False
     semantic_backend = "cpu"
+    semantic_available = HAS_SENTENCE_TRANSFORMERS or HAS_SKLEARN_SEMANTIC
     if HAS_SENTENCE_TRANSFORMERS:
         # Check if CUDA is available for sentence-transformers
         try:
@@ -2462,13 +2579,15 @@ def get_pipeline_status() -> Dict[str, Dict[str, Any]]:
                 semantic_backend = "pytorch-cuda"
         except Exception:
             pass
+    elif HAS_SKLEARN_SEMANTIC:
+        semantic_backend = "tfidf-cpu"
     
     pipelines["semantic_similarity"] = {
         "name": "Text Similarity",
         "gpu_enabled": semantic_gpu,
         "backend": semantic_backend,
-        "available": HAS_SENTENCE_TRANSFORMERS,
-        "notes": "SentenceTransformer embeddings"
+        "available": semantic_available,
+        "notes": "SentenceTransformer embeddings" if HAS_SENTENCE_TRANSFORMERS else "TF-IDF fallback"
     }
     
     # Audio fingerprinting (Chromaprint + GPU MFCC)

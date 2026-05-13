@@ -1,0 +1,76 @@
+{
+  "source_dir": "D:\\NOW SORT\\Duplicates Backup",
+  "target_dir": "D:\\NOW SORT\\Extera",
+  "run_root": "D:\\NOW SORT\\Extera\\dedup_run_20260321_043144",
+  "dry_run": true,
+  "policy": "same-track",
+  "scan_audio_file_count": 264,
+  "exact_group_count": 0,
+  "strict_pair_count": 2,
+  "near_candidate_count": 0,
+  "planned_move_count": 2,
+  "actual_moved_count": 2,
+  "elapsed_seconds": 111.20945954322815,
+  "exact_groups": {},
+  "strict_pairs": [
+    {
+      "files": [
+        "D:\\NOW SORT\\Duplicates Backup\\01 - Rolling In The Deep.mp3",
+        "D:\\NOW SORT\\Duplicates Backup\\01. Adele - Rolling In The Deep.flac"
+      ],
+      "score": 0.9983604354111895,
+      "details": {
+        "chromaprint_score": 0.3207417734115691,
+        "mfcc_score": 0.9983604354111895,
+        "method_used": "hybrid",
+        "duration_match": 0.9786324786324786,
+        "combined_score": null,
+        "near_match": false,
+        "strict_match": true,
+        "name_match": true,
+        "metadata_match": true,
+        "segment_scores": {
+          "start": 0.9996417164802551,
+          "middle": 0.9831883907318115,
+          "end": 0.9443000555038452
+        },
+        "policy": "same-track"
+      }
+    },
+    {
+      "files": [
+        "D:\\NOW SORT\\Duplicates Backup\\023. Flo Milli - Never Lose Me.mp3",
+        "D:\\NOW SORT\\Duplicates Backup\\17. Flo Milli - Never Lose Me.mp3"
+      ],
+      "score": 0.9997125467817423,
+      "details": {
+        "chromaprint_score": 0.34623221448230607,
+        "mfcc_score": 0.9997125467817423,
+        "method_used": "hybrid",
+        "duration_match": 1.0,
+        "combined_score": null,
+        "near_match": false,
+        "strict_match": true,
+        "name_match": true,
+        "metadata_match": true,
+        "segment_scores": {
+          "start": 0.9999952912330627,
+          "middle": 0.9981361627578735,
+          "end": 1.0
+        },
+        "policy": "same-track"
+      }
+    }
+  ],
+  "moved_files": [
+    {
+      "source": "D:\\NOW SORT\\Duplicates Backup\\01 - Rolling In The Deep.mp3",
+      "destination": "D:\\NOW SORT\\Extera\\01 - Rolling In The Deep.mp3"
+    },
+    {
+      "source": "D:\\NOW SORT\\Duplicates Backup\\17. Flo Milli - Never Lose Me.mp3",
+      "destination": "D:\\NOW SORT\\Extera\\17. Flo Milli - Never Lose Me.mp3"
+    }
+  ],
+  "near_review_candidates": []
+}

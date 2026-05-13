@@ -1,0 +1,48 @@
+{
+  "source_dir": "D:\\NOW SORT\\Duplicates Backup",
+  "target_dir": "D:\\NOW SORT\\Extera",
+  "run_root": "D:\\NOW SORT\\Extera\\dedup_run_20260320_050214",
+  "dry_run": true,
+  "policy": "same-track",
+  "scan_audio_file_count": 264,
+  "exact_group_count": 0,
+  "strict_pair_count": 1,
+  "near_candidate_count": 0,
+  "planned_move_count": 1,
+  "actual_moved_count": 1,
+  "elapsed_seconds": 193.3722367286682,
+  "exact_groups": {},
+  "strict_pairs": [
+    {
+      "files": [
+        "D:\\NOW SORT\\Duplicates Backup\\023. Flo Milli - Never Lose Me.mp3",
+        "D:\\NOW SORT\\Duplicates Backup\\17. Flo Milli - Never Lose Me.mp3"
+      ],
+      "score": 0.9997125467817423,
+      "details": {
+        "chromaprint_score": 0.34623221448230607,
+        "mfcc_score": 0.9997125467817423,
+        "method_used": "hybrid",
+        "duration_match": 1.0,
+        "combined_score": null,
+        "near_match": false,
+        "strict_match": true,
+        "name_match": true,
+        "metadata_match": true,
+        "segment_scores": {
+          "start": 0.9999952912330627,
+          "middle": 0.9981361627578735,
+          "end": 1.0
+        },
+        "policy": "same-track"
+      }
+    }
+  ],
+  "moved_files": [
+    {
+      "source": "D:\\NOW SORT\\Duplicates Backup\\17. Flo Milli - Never Lose Me.mp3",
+      "destination": "D:\\NOW SORT\\Extera\\17. Flo Milli - Never Lose Me.mp3"
+    }
+  ],
+  "near_review_candidates": []
+}

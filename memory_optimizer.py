@@ -74,8 +74,11 @@ class StreamingHasher:
             
     def _memory_mapped_hash(self, file_path: str, hasher) -> str:
         """Hash file using memory mapping for very large files"""
+        f = None
         try:
-            with open(file_path, 'rb') as f:
+            f = open(file_path, 'rb')
+            # MO-FIX: Handle mmap errors separately for better cleanup
+            try:
                 with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
                     # Process in chunks to avoid loading entire file
                     for i in range(0, len(mm), self.chunk_size):
@@ -85,12 +88,18 @@ class StreamingHasher:
                         # Yield control periodically (MO-2 fix: skip i=0 so no sleep before work begins)
                         if i > 0 and i % (self.chunk_size * 100) == 0:  # Every 100 chunks
                             time.sleep(0.001)
+            except (mmap.error, ValueError) as e:
+                logger.error(f"Memory mapping failed for {file_path}: {e}")
+                return ""
                             
             return hasher.hexdigest()
             
-        except Exception as e:
+        except (OSError, IOError) as e:
             logger.error(f"Memory mapped hash error for {file_path}: {e}")
             return ""
+        finally:
+            if f is not None:
+                f.close()
             
     def sample_hash(self, file_path: str, sample_size: int = 64 * 1024) -> str:
         """Create hash from file samples for very large files"""
@@ -310,7 +319,9 @@ class IncrementalScanner:
                 else:
                     large_files.append(file_path)
                     
-            except Exception:
+            except (OSError, IOError) as e:
+                # MO-FIX: Log error instead of silently defaulting
+                logger.warning(f"Cannot determine size of {file_path}: {e}")
                 small_files.append(file_path)  # Default to small if can't determine size
                 
         return {

@@ -12,6 +12,7 @@ from pathlib import Path
 import json
 from datetime import datetime
 import tempfile
+from copy import deepcopy
 
 logger = logging.getLogger(__name__)
 
@@ -217,10 +218,17 @@ class FileMerger:
     def _create_merge_preview(self, file1: str, file2: str, diff_info: Dict) -> str:
         """Create a preview of what the merged file would look like"""
         try:
-            with open(file1, 'r', encoding='utf-8', errors='ignore') as f:
-                content1 = f.read()
-            with open(file2, 'r', encoding='utf-8', errors='ignore') as f:
-                content2 = f.read()
+            # DM-FIX: Handle FileNotFoundError if files are deleted between analysis and preview
+            try:
+                with open(file1, 'r', encoding='utf-8', errors='ignore') as f:
+                    content1 = f.read()
+            except FileNotFoundError:
+                return f"Error: File no longer exists: {file1}"
+            try:
+                with open(file2, 'r', encoding='utf-8', errors='ignore') as f:
+                    content2 = f.read()
+            except FileNotFoundError:
+                return f"Error: File no longer exists: {file2}"
                 
             # Simple merge strategy: use newer file as base and add conflict markers
             file1_mtime = os.path.getmtime(file1)
@@ -614,8 +622,9 @@ class FileMerger:
         """Deep merge multiple JSON objects"""
         if not json_objects:
             return {}
-            
-        result = json_objects[0].copy() if isinstance(json_objects[0], dict) else json_objects[0]
+        
+        # DM-FIX: Use deepcopy to prevent mutation of source data
+        result = deepcopy(json_objects[0]) if isinstance(json_objects[0], dict) else json_objects[0]
         
         for obj in json_objects[1:]:
             if isinstance(result, dict) and isinstance(obj, dict):

@@ -19,12 +19,13 @@ except ImportError:
     HAS_XXHASH = False
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps
     import imagehash
     HAS_IMAGE = True
 except ImportError:
     HAS_IMAGE = False
     Image = None
+    ImageOps = None
     imagehash = None
 
 try:
@@ -228,10 +229,14 @@ def compare_document_files(file1: str, file2: str, profile: Dict[str, Any], sema
 
 
 def compare_archive_files(file1: str, file2: str, profile: Dict[str, Any]) -> Tuple[bool, float, list[str]]:
+    # MP-FIX: Handle specific ZipFile exceptions with better error messages
     try:
         with zipfile.ZipFile(file1) as zip1, zipfile.ZipFile(file2) as zip2:
             set1 = {(item.filename, item.file_size) for item in zip1.infolist()}
             set2 = {(item.filename, item.file_size) for item in zip2.infolist()}
+    except (zipfile.BadZipFile, OSError, EOFError):
+        # Corrupt or unreadable archive
+        return False, 0.0, []
     except Exception:
         return False, 0.0, []
 
@@ -241,19 +246,36 @@ def compare_archive_files(file1: str, file2: str, profile: Dict[str, Any]) -> Tu
     return score >= 0.90, score, [f"archive {score:.2f}"] if score >= 0.90 else []
 
 
+@functools.lru_cache(maxsize=4096)
+def _exact_image_signature(file_path: str) -> Optional[Tuple[int, int, str]]:
+    """Return a normalized pixel signature for strict image-content equality."""
+    if not HAS_IMAGE or Image is None:
+        return None
+
+    try:
+        with Image.open(file_path) as src:
+            normalized = ImageOps.exif_transpose(src) if ImageOps is not None else src.copy()
+            rgba = normalized.convert("RGBA")
+            width, height = rgba.size
+            digest = hashlib.sha256(rgba.tobytes()).hexdigest()
+            return (width, height, digest)
+    except Exception:
+        return None
+
+
 def compare_image_files(file1: str, file2: str, profile: Dict[str, Any]) -> Tuple[bool, float, list[str]]:
     if not HAS_IMAGE:
         return False, 0.0, []
-    try:
-        with Image.open(file1) as img1, Image.open(file2) as img2:
-            hash1 = imagehash.phash(img1)
-            hash2 = imagehash.phash(img2)
-            distance = hash1 - hash2
-            score = 1.0 - min(distance, 64) / 64.0
-            reasons = [f"phash {distance}"]
-            return score >= 0.85, score, reasons
-    except Exception:
+    sig1 = _exact_image_signature(file1)
+    sig2 = _exact_image_signature(file2)
+    if not sig1 or not sig2:
         return False, 0.0, []
+
+    if sig1 == sig2:
+        width, height, _ = sig1
+        return True, 1.0, [f"Exact image content ({width}x{height})"]
+
+    return False, 0.0, []
 
 
 def estimate_scene_based_keyframes(file_path: str, default_keyframes: int = 8) -> int:

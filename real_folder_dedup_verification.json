@@ -1,0 +1,891 @@
+{
+  "strict_pairs_in_report": 2373,
+  "pairs_evaluated": 2373,
+  "missing_pairs_skipped": 0,
+  "criteria": "same song requires name_match AND meta_match AND stream(start,mid,end)>=0.985",
+  "pass_count": 0,
+  "fail_count": 2373,
+  "fail_rate": 1.0,
+  "sample_failed_pairs": [
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Bobby Helms - Jingle Bell Rock.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\003. Brenda Lee - Rockin' Around The Christmas Tree.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.919153094291687,
+        "middle": 0.939035177230835,
+        "end": 0.9772142767906189
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Bobby Helms - Jingle Bell Rock.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\016. Burl Ives - A Holly Jolly Christmas.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9540350437164307,
+        "middle": 0.9482926726341248,
+        "end": 0.9861053824424744
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Bobby Helms - Jingle Bell Rock.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\039. Taylor Swift - I Look in People's Windows.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9337620735168457,
+        "middle": 0.8990179300308228,
+        "end": 0.9890676736831665
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Bobby Helms - Jingle Bell Rock.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\041. The Beach Boys - Little Saint Nick.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9172646403312683,
+        "middle": 0.8977348804473877,
+        "end": 0.9712851047515869
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Bobby Helms - Jingle Bell Rock.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\066. Lay Bankz - Tell Ur Girlfriend.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9518840312957764,
+        "middle": 0.7797034978866577,
+        "end": 0.9649529457092285
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Bobby Helms - Jingle Bell Rock.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\07. AP$ENT - \u041c\u043e\u0436\u043d\u043e \u044f \u0441 \u0442\u043e\u0431\u043e\u0439.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9728800654411316,
+        "middle": 0.9355639815330505,
+        "end": 0.9567747116088867
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Bobby Helms - Jingle Bell Rock.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\26. Lilithzplug - CLEARED - Remix.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9398202896118164,
+        "middle": 0.868431031703949,
+        "end": 0.9700332880020142
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Bobby Helms - Jingle Bell Rock.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\34. Bryansanon - MOVE YO BODY.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9770033359527588,
+        "middle": 0.7655187249183655,
+        "end": 0.9434993863105774
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Bobby Helms - Jingle Bell Rock.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\44. MC Mablo Dos Pared\u00f5es - Relaxed.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9465078711509705,
+        "middle": 0.9701836109161377,
+        "end": 0.82317054271698
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Brenda Lee - Rockin' Around The Christmas Tree.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\021. Frank Sinatra - Jingle Bells.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.7064341902732849,
+        "middle": 0.9313961863517761,
+        "end": 0.9876303672790527
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Brenda Lee - Rockin' Around The Christmas Tree.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\039. Taylor Swift - I Look in People's Windows.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.8517497181892395,
+        "middle": 0.7737881541252136,
+        "end": 0.9883947968482971
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Brenda Lee - Rockin' Around The Christmas Tree.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\041. The Beach Boys - Little Saint Nick.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9550567269325256,
+        "middle": 0.9158728122711182,
+        "end": 0.9379673004150391
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Brenda Lee - Rockin' Around The Christmas Tree.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\066. Lay Bankz - Tell Ur Girlfriend.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9485666155815125,
+        "middle": 0.8427656292915344,
+        "end": 0.9948074817657471
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Brenda Lee - Rockin' Around The Christmas Tree.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\07. AP$ENT - \u041c\u043e\u0436\u043d\u043e \u044f \u0441 \u0442\u043e\u0431\u043e\u0439.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.965735137462616,
+        "middle": 0.8887393474578857,
+        "end": 0.9721798300743103
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Brenda Lee - Rockin' Around The Christmas Tree.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\16. Glee Cast - Rose's Turn (Glee Cast Version).mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9069386720657349,
+        "middle": 0.8896679878234863,
+        "end": 0.9871554970741272
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Brenda Lee - Rockin' Around The Christmas Tree.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\26. Lilithzplug - CLEARED - Remix.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.8307775855064392,
+        "middle": 0.8460032343864441,
+        "end": 0.926162600517273
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Brenda Lee - Rockin' Around The Christmas Tree.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\34. Bryansanon - MOVE YO BODY.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.8758207559585571,
+        "middle": 0.7775612473487854,
+        "end": 0.9185024499893188
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Brenda Lee - Rockin' Around The Christmas Tree.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\44. MC Mablo Dos Pared\u00f5es - Relaxed.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9112032651901245,
+        "middle": 0.9063524603843689,
+        "end": 0.763654351234436
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\019. HUNTRX, EJAE, Audrey Nuna, REI AMI & KPop Demon Hunters Cast - Golden.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9752070903778076,
+        "middle": 0.5729909539222717,
+        "end": 0.989202082157135
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\024. Tyla - Water.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9412195682525635,
+        "middle": 0.7820389866828918,
+        "end": 0.9720816612243652
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\028. Megan Thee Stallion - HISS.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.8250818252563477,
+        "middle": 0.822932243347168,
+        "end": 0.9431304335594177
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\035. Shaboozey & Jelly Roll - Amen.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9644883275032043,
+        "middle": 0.9310295581817627,
+        "end": 0.9519123435020447
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\042. Shakira - Zoo.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9175848364830017,
+        "middle": 0.9490911364555359,
+        "end": 0.977154552936554
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\05. Cat Janice - Dance You Outta My Head.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9761150479316711,
+        "middle": 0.8306013941764832,
+        "end": 0.966178297996521
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\058. David Guetta, Teddy Swims & Tones and I - Gone Gone Gone.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9321590065956116,
+        "middle": 0.983899712562561,
+        "end": 0.9387677311897278
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\069. Teddy Swims - Lose Control.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9588043093681335,
+        "middle": 0.8764241337776184,
+        "end": 0.988940417766571
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\070. Hudson Westbrook - House Again.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9712493419647217,
+        "middle": 0.9310125708580017,
+        "end": 0.99212247133255
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\079. Taylor Swift - Elizabeth Taylor.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9646255970001221,
+        "middle": 0.962710976600647,
+        "end": 0.9905802607536316
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\096. Phil Wickham - What An Awesome God.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9648873209953308,
+        "middle": 0.8737200498580933,
+        "end": 0.9215306639671326
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\93. The Kid LAROI - TOO MUCH.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9541193842887878,
+        "middle": 0.9021973013877869,
+        "end": 0.9960682392120361
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\Born to Shine.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9037565588951111,
+        "middle": 0.7971941828727722,
+        "end": 0.9861041903495789
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\Illuminati - From Aavesham.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9666813611984253,
+        "middle": 0.9749307632446289,
+        "end": 0.9750776886940002
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\003. Zara Larsson - Lush Life.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\Zamaana Lage (From _Metro ... In Dino_) - Pritam.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9648151397705078,
+        "middle": 0.8138677477836609,
+        "end": 0.9772500395774841
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\012. The Ronettes - Sleigh Ride.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9076982140541077,
+        "middle": 0.9201956391334534,
+        "end": 0.8888724446296692
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\014. Jos\u00e9 Feliciano - Feliz Navidad.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9448544979095459,
+        "middle": 0.9755122661590576,
+        "end": 0.9593513607978821
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\018. Justin Bieber - DAISIES.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9501506686210632,
+        "middle": 0.8208221197128296,
+        "end": 0.993042528629303
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\019. HUNTRX, EJAE, Audrey Nuna, REI AMI & KPop Demon Hunters Cast - Golden.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9683380126953125,
+        "middle": 0.8966655135154724,
+        "end": 0.9473826885223389
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\02 - Taylor Swift - Cruel Summer.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9686598777770996,
+        "middle": 0.7938680052757263,
+        "end": 0.9900678396224976
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\025. Sonny Fodera, D.O.D & Poppy Baskcomb - Think About Us.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9763743281364441,
+        "middle": 0.9221352934837341,
+        "end": 0.9427424669265747
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\025. Tate McRae - TIT FOR TAT.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9406378865242004,
+        "middle": 0.918250322341919,
+        "end": 0.9560844898223877
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\028. BigXthaPlug - Hell At Night (feat. Ella Langley).mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9267667531967163,
+        "middle": 0.878484845161438,
+        "end": 0.9475721120834351
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\029. Max McNown - Better Me For You (Brown Eyes).mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9797735214233398,
+        "middle": 0.8181725144386292,
+        "end": 0.9321100115776062
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\030. Taylor Swift - The Albatross.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9427414536476135,
+        "middle": 0.9049704074859619,
+        "end": 0.9219908714294434
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\033. Eagles - Please Come Home for Christmas (2013 Remaster).mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.8797905445098877,
+        "middle": 0.9623823165893555,
+        "end": 0.9186612367630005
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\035. Gene Autry - Rudolph the Red-Nosed Reindeer.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9030369520187378,
+        "middle": 0.8648762106895447,
+        "end": 0.9843241572380066
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\039. PinkPantheress & Zara Larsson - Stateside.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.968039870262146,
+        "middle": 0.7692108750343323,
+        "end": 0.9809241890907288
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\039. Thurl Ravenscroft - You're A Mean One, Mr. Grinch.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9854266047477722,
+        "middle": 0.9062327742576599,
+        "end": 0.9583058953285217
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\042. Shakira - Zoo.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9388357996940613,
+        "middle": 0.9385722279548645,
+        "end": 0.9728067517280579
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\043. Mariah the Scientist & Kali Uchis - Is It a Crime.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.8705934286117554,
+        "middle": 0.9369369149208069,
+        "end": 0.7862939238548279
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\060. Morgan Wallen - I Ain't Comin' Back.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9220947027206421,
+        "middle": 0.5858518481254578,
+        "end": 0.938836932182312
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\063. Russell Dickerson - Happen To Me (feat. Jonas Brothers).mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9707273244857788,
+        "middle": 0.4657568633556366,
+        "end": 0.9518401026725769
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\072. Alex Warren - Bloodline.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9525882005691528,
+        "middle": 0.9252850413322449,
+        "end": 0.9871563911437988
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\073. Megan Moroney - 6 Months Later.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.8077527284622192,
+        "middle": 0.6837500929832458,
+        "end": 0.9699923992156982
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\077. Bakar - Hell N Back (feat. Summer Walker).mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.934310793876648,
+        "middle": 0.9751387238502502,
+        "end": 0.9898219108581543
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\078. Dua Lipa - Illusion.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9868640899658203,
+        "middle": 0.7446606755256653,
+        "end": 0.9076791405677795
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\078. Olivia Dean - Let Alone The One You Love.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9766218662261963,
+        "middle": 0.9778434634208679,
+        "end": 0.9698179960250854
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\079. Alex Warren - Burning Down.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.953404426574707,
+        "middle": 0.6083301305770874,
+        "end": 0.956774115562439
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\082. Sabrina Carpenter - Feather.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9719203114509583,
+        "middle": 0.9483606815338135,
+        "end": 0.9147030711174011
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\090. Gavin Adcock - Last One To Know.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9837538003921509,
+        "middle": 0.9280421137809753,
+        "end": 0.931302011013031
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\090. Parmalee - Cowgirl.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9513079524040222,
+        "middle": 0.8860461711883545,
+        "end": 0.9617210626602173
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\091. Alex Warren - Eternity.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9566106796264648,
+        "middle": 0.9735952019691467,
+        "end": 0.9457606077194214
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\098. Doechii & SZA - girl, get up.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9606633186340332,
+        "middle": 0.9478477835655212,
+        "end": 0.9167352914810181
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\125. Benson Boone - Cry.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.8865710496902466,
+        "middle": 0.5980727076530457,
+        "end": 0.9738644957542419
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\31 - Taylor Swift - Midnight Rain.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9598791003227234,
+        "middle": 0.9607754349708557,
+        "end": 0.9266096353530884
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\33. Cxsper - Yasashi.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9704641699790955,
+        "middle": 0.933578372001648,
+        "end": 0.9734094738960266
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\44. MC Mablo Dos Pared\u00f5es - Relaxed.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9791202545166016,
+        "middle": 0.940419614315033,
+        "end": 0.8606097102165222
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\Baby, You're A Rich Man - Remastered 2009.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9437035918235779,
+        "middle": 0.9579851627349854,
+        "end": 0.9341191649436951
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\Espresso.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.976952075958252,
+        "middle": 0.9352179765701294,
+        "end": 0.951616644859314
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\Lover.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9259368777275085,
+        "middle": 0.9188403487205505,
+        "end": 0.9598529934883118
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\004. Olivia Dean - Man I Need.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\Naina (From Crew).mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9571031332015991,
+        "middle": 0.9344311952590942,
+        "end": 0.9922680854797363
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\006. Bruno Mars - I Just Might.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\02. Adele - Rumour Has It.flac",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9588735103607178,
+        "middle": 0.9838187098503113,
+        "end": 0.9672374725341797
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\006. Bruno Mars - I Just Might.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\024. Eartha Kitt - Santa Baby (with Henri Ren\u00e9 & His Orchestra).mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9463931322097778,
+        "middle": 0.9272791743278503,
+        "end": 0.9801710844039917
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\006. Bruno Mars - I Just Might.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\028. Taylor Swift - imgonnagetyouback.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.8970184326171875,
+        "middle": 0.9428070187568665,
+        "end": 0.9980565309524536
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\006. Bruno Mars - I Just Might.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\038. Kendrick Lamar - tv off.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9497320652008057,
+        "middle": 0.9054061770439148,
+        "end": 0.9218642711639404
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\006. Bruno Mars - I Just Might.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\04. Gc Eternal - Back It up and Dump It (Dump Truck).mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9839206337928772,
+        "middle": 0.9692805409431458,
+        "end": 0.9530313611030579
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\006. Bruno Mars - I Just Might.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\042. Ed Sheeran & Elton John - Merry Christmas.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9022573232650757,
+        "middle": 0.6648703217506409,
+        "end": 0.9590085744857788
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\006. Bruno Mars - I Just Might.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\069. Teddy Swims - Lose Control.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9305669069290161,
+        "middle": 0.8758260011672974,
+        "end": 0.9216049909591675
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\006. Bruno Mars - I Just Might.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\071. YoungBoy Never Broke Again - Shot Callin.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9479387998580933,
+        "middle": 0.8794931769371033,
+        "end": 0.962117075920105
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\006. Bruno Mars - I Just Might.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\074. Morgan Wallen - Love Somebody.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.8637433052062988,
+        "middle": 0.907490611076355,
+        "end": 0.9890537261962891
+      }
+    },
+    {
+      "a": "D:\\NOW SORT\\Duplicates Backup\\006. Bruno Mars - I Just Might.mp3",
+      "b": "D:\\NOW SORT\\Duplicates Backup\\077. Olivia Dean - Nice To Each Other.mp3",
+      "name_match": false,
+      "meta_match": false,
+      "stream": {
+        "start": 0.9629563093185425,
+        "middle": 0.967149019241333,
+        "end": 0.9817714095115662
+      }
+    }
+  ]
+}

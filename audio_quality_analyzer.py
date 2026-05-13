@@ -73,6 +73,9 @@ class AudioQualityAnalyzer:
             sample_rate_hz = 0.0
             duration_s = 0.0
             analysis_error = False
+            title = ""
+            artist = ""
+            album = ""
 
             if HAS_MUTAGEN and MutagenFile is not None:
                 try:
@@ -89,6 +92,11 @@ class AudioQualityAnalyzer:
                             sample_rate_hz = float(sample_rate)
                         if duration:
                             duration_s = float(duration)
+                    if audio and getattr(audio, "tags", None):
+                        tags = audio.tags
+                        title = self._extract_text_tag(tags, ("title", "TIT2", "\xa9nam"))
+                        artist = self._extract_text_tag(tags, ("artist", "TPE1", "\xa9ART"))
+                        album = self._extract_text_tag(tags, ("album", "TALB", "\xa9alb"))
                 except Exception as e:
                     analysis_error = True
                     logger.warning(f"Audio metadata read failed for {file_path}: {e}")
@@ -102,6 +110,9 @@ class AudioQualityAnalyzer:
                 'bitrate_kbps': float(bitrate_kbps) if bitrate_kbps else 0.0,
                 'sample_rate_hz': float(sample_rate_hz) if sample_rate_hz else 0.0,
                 'duration_s': float(duration_s) if duration_s else 0.0,
+                'title': title,
+                'artist': artist,
+                'album': album,
                 'file_size_mb': float(file_size_mb),
                 'file_size_bytes': int(file_size_bytes),
                 'analysis_error': analysis_error
@@ -109,6 +120,24 @@ class AudioQualityAnalyzer:
         except Exception as e:
             logger.warning(f"Audio metadata error for {file_path}: {e}")
             return None
+
+    @staticmethod
+    def _extract_text_tag(tags, keys) -> str:
+        """Extract a best-effort text value from mutagen tags."""
+        for key in keys:
+            if key not in tags:
+                continue
+            value = tags.get(key)
+            if value is None:
+                continue
+            if hasattr(value, "text"):
+                value = value.text
+            if isinstance(value, (list, tuple)):
+                value = value[0] if value else ""
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
 
     def calculate_quality_score(self, metadata: Dict[str, Any]) -> float:
         """Calculate weighted quality score from metadata."""

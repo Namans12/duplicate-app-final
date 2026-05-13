@@ -167,7 +167,12 @@ try:
     HAS_TRANSFORMERS = True
     logger.debug("SentenceTransformers available")
 except Exception as e:
-    logger.warning(f"SentenceTransformers unavailable - semantic similarity disabled: {e}")
+    logger.info(f"SentenceTransformers unavailable - semantic similarity will use fallback if available: {e}")
+
+# Normalize the availability flag to the imported class reference. In some Windows
+# import sequences the class object is available even when the optimistic flag path
+# above did not complete cleanly.
+HAS_TRANSFORMERS = SentenceTransformer is not None
 
 # Audio processing
 HAS_AUDIO = False

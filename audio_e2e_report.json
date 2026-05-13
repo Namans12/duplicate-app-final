@@ -1,0 +1,143 @@
+{
+  "dataset_counts": {
+    "exact_duplicates": 1,
+    "encoding_variants": 5,
+    "hard_negatives": 8
+  },
+  "baseline_metrics": {
+    "exact_duplicate_recall": 1.0,
+    "near_duplicate_recall": 0.2,
+    "false_positives": 5,
+    "runtime_seconds": 4.704995400010375
+  },
+  "post_change_metrics": {
+    "exact_duplicate_recall": 1.0,
+    "near_duplicate_recall": 1.0,
+    "false_positives": 0,
+    "runtime_seconds": 0.4318914000177756
+  },
+  "findings": {
+    "baseline": {
+      "missed_exact_pairs": [],
+      "missed_near_pairs": [
+        [
+          "song_a.flac",
+          "song_a.wav"
+        ],
+        [
+          "song_a.flac",
+          "song_a_copy.wav"
+        ],
+        [
+          "song_a.wav",
+          "song_a_pcm24.wav"
+        ],
+        [
+          "song_a_copy.wav",
+          "song_a_pcm24.wav"
+        ]
+      ],
+      "hard_negative_false_positives": [
+        [
+          "song_a.flac",
+          "song_b_hard.wav"
+        ],
+        [
+          "song_a.flac",
+          "totally_different.wav"
+        ],
+        [
+          "song_a_pcm24.wav",
+          "song_b_hard.wav"
+        ],
+        [
+          "song_a_pcm24.wav",
+          "totally_different.wav"
+        ]
+      ],
+      "false_positive_pairs_all": [
+        [
+          "song_a.flac",
+          "song_b_hard.wav"
+        ],
+        [
+          "song_a.flac",
+          "totally_different.wav"
+        ],
+        [
+          "song_a_pcm24.wav",
+          "song_b_hard.wav"
+        ],
+        [
+          "song_a_pcm24.wav",
+          "totally_different.wav"
+        ],
+        [
+          "song_b_hard.wav",
+          "totally_different.wav"
+        ]
+      ],
+      "missed_segment_similarity": {
+        "song_a.flac :: song_a.wav": {
+          "start": 0.9999998807907104,
+          "middle": 1.0,
+          "end": 0.9999998807907104
+        },
+        "song_a.flac :: song_a_copy.wav": {
+          "start": 0.9999998807907104,
+          "middle": 1.0,
+          "end": 0.9999998807907104
+        },
+        "song_a.wav :: song_a_pcm24.wav": {
+          "start": 0.9999998807907104,
+          "middle": 1.0,
+          "end": 0.9999999403953552
+        },
+        "song_a_copy.wav :: song_a_pcm24.wav": {
+          "start": 0.9999998807907104,
+          "middle": 1.0,
+          "end": 0.9999999403953552
+        }
+      },
+      "hard_negative_segment_similarity": {
+        "song_a.flac :: song_b_hard.wav": {
+          "start": 0.9999998807907104,
+          "middle": 0.9256632328033447,
+          "end": 0.9999998807907104
+        },
+        "song_a.flac :: totally_different.wav": {
+          "start": 0.942686140537262,
+          "middle": 0.9285069704055786,
+          "end": 0.9425135254859924
+        },
+        "song_a_pcm24.wav :: song_b_hard.wav": {
+          "start": 0.9999998807907104,
+          "middle": 0.9256635308265686,
+          "end": 0.9999999403953552
+        },
+        "song_a_pcm24.wav :: totally_different.wav": {
+          "start": 0.9426848888397217,
+          "middle": 0.9285070300102234,
+          "end": 0.9425137042999268
+        }
+      },
+      "mergeable_group_count": 0
+    },
+    "post_change": {
+      "missed_exact_pairs": [],
+      "missed_near_pairs": [],
+      "hard_negative_false_positives": [],
+      "false_positive_pairs_all": [],
+      "missed_segment_similarity": {},
+      "hard_negative_segment_similarity": {},
+      "mergeable_group_count": 0
+    }
+  },
+  "net_improvement": {
+    "exact_duplicate_recall_delta": 0.0,
+    "near_duplicate_recall_delta": 0.8,
+    "false_positives_delta": -5,
+    "runtime_seconds_delta": -4.2731039999926
+  },
+  "dataset_dir": "C:\\Users\\naman\\AppData\\Local\\Temp\\audio_e2e__fes_hqh"
+}

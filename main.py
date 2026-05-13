@@ -12,6 +12,7 @@ import shutil
 import json
 import csv
 import time
+import re
 import threading
 import multiprocessing
 from copy import deepcopy
@@ -21,6 +22,42 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 from functools import partial
 from queue import Queue
+
+# Initialize logger early since it's needed for import error handling
+import logging
+logger = logging.getLogger(__name__)
+
+# Import shared utilities from dependencies module early so DLL-backed libraries
+# are initialized in one place and Windows import order stays stable.
+from dependencies import (
+    AppConfig,
+    HAS_CUDA as DEP_HAS_CUDA,
+    CUDA_BACKEND as DEP_CUDA_BACKEND,
+    HAS_SEND2TRASH as DEP_SEND2TRASH,
+    send2trash_func,
+    cp as DEP_CP,
+    torch as DEP_TORCH,
+    HAS_PILLOW as DEP_HAS_PILLOW,
+    Image as DEP_IMAGE,
+    imagehash as DEP_IMAGEHASH,
+    HAS_CV2 as DEP_HAS_CV2,
+    cv2 as DEP_CV2,
+    HAS_AUDIO as DEP_HAS_AUDIO,
+    AudioSegment as DEP_AUDIOSEGMENT,
+    HAS_NUMPY as DEP_HAS_NUMPY,
+    np as DEP_NP,
+)
+
+HAS_PILLOW = DEP_HAS_PILLOW
+Image = DEP_IMAGE
+imagehash = DEP_IMAGEHASH
+HAS_CV2 = DEP_HAS_CV2
+cv2 = DEP_CV2
+HAS_AUDIO = DEP_HAS_AUDIO
+AudioSegment = DEP_AUDIOSEGMENT
+HAS_NUMPY = DEP_HAS_NUMPY
+np = DEP_NP
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QListWidget, QVBoxLayout, QWidget,
     QFileDialog, QMessageBox, QProgressBar, QLabel, QHBoxLayout, QComboBox,
@@ -32,46 +69,6 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QEvent, QObject, QThread, pyqtSignal, Qt, QTimer, QSettings, QSize, QMimeData
 from PyQt6.QtGui import QPixmap, QAction, QShortcut, QKeySequence, QIcon, QDragEnterEvent, QDropEvent, QPalette, QColor, QFont
-
-# Initialize logger early since it's needed for import error handling
-import logging
-logger = logging.getLogger(__name__)
-
-# Optional imports with fallbacks
-try:
-    from PIL import Image
-    import imagehash
-    HAS_PILLOW = True
-except ImportError:
-    HAS_PILLOW = False
-    Image = None
-    imagehash = None
-
-try:
-    import cv2
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
-
-try:
-    from sentence_transformers import SentenceTransformer
-    HAS_TRANSFORMERS = True
-except ImportError:
-    HAS_TRANSFORMERS = False
-
-try:
-    from pydub import AudioSegment
-    HAS_AUDIO = True
-except ImportError:
-    HAS_AUDIO = False
-
-# Try to import numpy for optimized operations (independent of pydub)
-try:
-    import numpy as np
-    HAS_NUMPY = True
-except ImportError:
-    np = None
-    HAS_NUMPY = False
 
 # CUDA / GPU Acceleration imports
 HAS_CUDA = False
@@ -91,6 +88,7 @@ semantic_engine = None
 
 # Pipeline status function
 get_acceleration_summary = None
+PHashThresholds = None
 
 # Import GPU acceleration status from gpu_accelerator module
 try:
@@ -101,7 +99,8 @@ try:
         audio_fingerprinter as _audio_fp,
         get_acceleration_summary as _get_accel_summary,
         HAS_CUDA as _HAS_CUDA,
-        BACKEND as _BACKEND
+        BACKEND as _BACKEND,
+        PHashThresholds as _PHashThresholds,
     )
     video_fingerprinter = _vfp
     HAS_VIDEO_FINGERPRINTER = _vfp.has_cv2
@@ -110,6 +109,7 @@ try:
     semantic_engine = _sem_engine
     HAS_SEMANTIC_SIMILARITY = _sem_engine.is_available
     get_acceleration_summary = _get_accel_summary
+    PHashThresholds = _PHashThresholds
     
     # Reuse GPU status from gpu_accelerator
     HAS_CUDA = _HAS_CUDA
@@ -160,12 +160,6 @@ class ScanProgress:
     bytes_saved: int = 0
 
 
-# Import shared utilities from dependencies module
-from dependencies import (
-    AppConfig, HAS_CUDA as DEP_HAS_CUDA, CUDA_BACKEND as DEP_CUDA_BACKEND,
-    HAS_SEND2TRASH as DEP_SEND2TRASH, send2trash_func
-)
-
 # CF-2: Fall back to dependency-level GPU detection if gpu_accelerator failed to load
 if not HAS_CUDA and DEP_HAS_CUDA:
     HAS_CUDA = DEP_HAS_CUDA
@@ -174,6 +168,8 @@ if not HAS_CUDA and DEP_HAS_CUDA:
 # CF-3: Consolidate send2trash — use single source from dependencies module
 HAS_SEND2TRASH = DEP_SEND2TRASH
 send2trash = send2trash_func  # Alias so existing call sites work unchanged
+cp = DEP_CP
+torch_module = DEP_TORCH
 from audio_quality_analyzer import AudioQualityAnalyzer
 from media_profiles import (
     compare_archive_files,
@@ -616,6 +612,98 @@ class FileComparator:
     def normalized_name(value):
         """Lowercase alphanumeric filename key for fast similarity checks."""
         return "".join(ch for ch in value.lower() if ch.isalnum())
+
+    @staticmethod
+    def audio_title_variants(value):
+        """
+        Build normalized title candidates for audio filenames.
+
+        This is intentionally conservative: it strips track numbers and common
+        artist-title separators so cross-encode copies of the same song can be
+        rescued when the acoustic fingerprint is close but not over the hard bar.
+        """
+        raw = os.path.splitext(os.path.basename(value))[0].lower().strip()
+        candidates = {raw}
+        cleaned = re.sub(r"^\s*\d+\s*[\.\-_) ]+\s*", "", raw).strip()
+        if cleaned:
+            candidates.add(cleaned)
+        for candidate in list(candidates):
+            deduped = re.sub(r"\s*\(\d+\)$", "", candidate).strip()
+            if deduped:
+                candidates.add(deduped)
+            for separator in (" - ", " – ", " — "):
+                if separator in candidate:
+                    parts = [part.strip() for part in candidate.split(separator) if part.strip()]
+                    if len(parts) >= 2:
+                        candidates.add(parts[-1])
+        normalized = {
+            FileComparator.normalized_name(candidate)
+            for candidate in candidates
+        }
+        return {candidate for candidate in normalized if len(candidate) >= 6}
+
+    @staticmethod
+    def audio_copy_name_match(file1, file2):
+        """Detect duplicate-style audio filenames like 'Song' vs 'Song (1)'.
+        
+        IMPORTANT: This should only match when BOTH artist AND title are the same,
+        or when the full filename (including artist) matches.
+        """
+        def parse_artist_title(value):
+            """Parse 'Artist - Title' or return (None, full_name) for title-only."""
+            raw = os.path.splitext(os.path.basename(value))[0].lower().strip()
+            # Remove leading track numbers like "01. " or "067. "
+            raw = re.sub(r"^\s*\d+\s*[\.\-_) ]+\s*", "", raw).strip()
+            # Remove trailing copy markers like "(1)" or "(2)"
+            raw = re.sub(r"\s*\(\d+\)$", "", raw).strip()
+            
+            # Try to split on " - " to get artist and title
+            parts = [part.strip() for part in re.split(r"\s[-–—]\s", raw, maxsplit=1) if part.strip()]
+            if len(parts) >= 2:
+                artist = FileComparator.normalized_name(parts[0])
+                title = FileComparator.normalized_name(parts[1])
+                return (artist, title)
+            # No artist-title split found, treat whole thing as title
+            return (None, FileComparator.normalized_name(raw))
+
+        artist1, title1 = parse_artist_title(file1)
+        artist2, title2 = parse_artist_title(file2)
+        
+        # Require title match with minimum length
+        if not title1 or not title2 or len(title1) < 8 or title1 != title2:
+            return False
+        
+        # If both have artists, they MUST match (different artists = different songs)
+        if artist1 and artist2:
+            return artist1 == artist2
+        
+        # If neither has artist, match on title only (legacy behavior for simple filenames)
+        if not artist1 and not artist2:
+            return True
+        
+        # One has artist, one doesn't - be conservative, don't match
+        return False
+
+    @staticmethod
+    def audio_title_match(file1, file2):
+        """Return True when audio filenames strongly imply the same track title."""
+        variants1 = FileComparator.audio_title_variants(file1)
+        variants2 = FileComparator.audio_title_variants(file2)
+        if not variants1 or not variants2:
+            return False
+        if variants1.intersection(variants2):
+            return True
+        return any(
+            short in long_name
+            for short in variants1
+            for long_name in variants2
+            if len(short) >= 8 and len(short) + 4 <= len(long_name)
+        ) or any(
+            short in long_name
+            for short in variants2
+            for long_name in variants1
+            if len(short) >= 8 and len(short) + 4 <= len(long_name)
+        )
     
     @staticmethod
     def compare_by_name(file1, file2, similarity_threshold=0.8):
@@ -1010,10 +1098,14 @@ class UndoManager:
     def backup_file(self, file_path):
         """Backup a file before deletion"""
         try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             filename = os.path.basename(file_path)
             backup_name = f"{timestamp}_{filename}"
             backup_path = os.path.join(self.backup_dir, backup_name)
+            counter = 1
+            while os.path.exists(backup_path):
+                backup_path = os.path.join(self.backup_dir, f"{timestamp}_{counter}_{filename}")
+                counter += 1
             
             shutil.copy2(file_path, backup_path)
             
@@ -1040,6 +1132,17 @@ class UndoManager:
             logger.error(f"Backup failed: {e}")
             return False
 
+    def discard_operation(self, operation):
+        """Drop a recorded operation and clean any backup artifact it owns."""
+        try:
+            if operation in self.operations:
+                self.operations.remove(operation)
+            backup_path = operation.get('backup_path') if isinstance(operation, dict) else None
+            if backup_path and os.path.exists(backup_path):
+                os.remove(backup_path)
+        except Exception as e:
+            logger.error(f"Failed to discard undo operation: {e}")
+
     def record_move(self, original_path, new_path):
         """Record a move operation for undo."""
         try:
@@ -1052,7 +1155,7 @@ class UndoManager:
             }
             self.operations.append(operation)
             if len(self.operations) > self.max_operations:
-                self.operations.pop(0)
+                self.discard_operation(self.operations[0])
             return True
         except Exception as e:
             logger.error(f"Failed to record move: {e}")
@@ -1132,171 +1235,204 @@ def compute_file_hash_worker(args):
         return (file_path, None)
 
 
+_PERCEPTUAL_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
+
+
+def _format_perceptual_bits(bit_values):
+    """Normalize GPU-generated perceptual hashes to the same hex shape as imagehash."""
+    bits = ''.join('1' if bool(value) else '0' for value in bit_values)
+    if not bits:
+        return None
+    return f"{int(bits, 2):016x}"
+
+
+def _perceptual_hash_to_int(hash_value):
+    """Convert a perceptual hash string to a 64-bit integer for fast comparisons."""
+    if not hash_value:
+        return None
+
+    try:
+        if isinstance(hash_value, int):
+            return hash_value
+        if len(hash_value) == 16:
+            return int(hash_value, 16)
+        if len(hash_value) == 64 and set(hash_value) <= {"0", "1"}:
+            return int(hash_value, 2)
+    except (TypeError, ValueError):
+        return None
+
+    return None
+
+
+def _default_gpu_batch_size():
+    """Return the detected safe batch size for the active accelerator."""
+    accelerator = globals().get("_gpu_accel")
+    if HAS_CUDA and accelerator is not None:
+        try:
+            batch_size = int(getattr(accelerator, "optimal_batch_size", 32) or 32)
+            return max(1, batch_size)
+        except Exception:
+            pass
+    return 32
+
+
+def _resolve_gpu_batch_size(configured_size, upgrade_legacy_default=True):
+    """
+    Normalize a configured GPU batch size.
+
+    Historical builds saved `32` as a fixed default. When CUDA is available and
+    the detected accelerator suggests a higher safe batch size, treat that old
+    `32` as "use the optimal detected default".
+    """
+    default_size = _default_gpu_batch_size()
+
+    try:
+        batch_size = int(configured_size)
+    except (TypeError, ValueError):
+        return default_size
+
+    if batch_size <= 0:
+        return default_size
+    if upgrade_legacy_default and HAS_CUDA and default_size > 32 and batch_size == 32:
+        return default_size
+    return batch_size
+
+
+def _call_gpu_perceptual_batch(image_paths, batch_size=1, timeout_seconds=None):
+    """Run the shared GPU perceptual hasher with a timeout, then fall back if it stalls."""
+    accelerator = globals().get("_gpu_accel")
+    if accelerator is None:
+        return None
+
+    result = {"hashes": None, "error": None}
+
+    def _worker():
+        try:
+            result["hashes"] = accelerator.batch_perceptual_hash_gpu(
+                image_paths,
+                batch_size=batch_size,
+            )
+        except Exception as exc:
+            result["error"] = exc
+
+    timeout = timeout_seconds
+    if timeout is None:
+        timeout = min(45.0, max(8.0, 2.0 + len(image_paths) * 0.2))
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    worker.join(timeout)
+
+    if worker.is_alive():
+        logger.warning(
+            "GPU perceptual hashing timed out after %.1fs for %d image(s); falling back to CPU",
+            timeout,
+            len(image_paths),
+        )
+        return None
+
+    if result["error"] is not None:
+        raise result["error"]
+
+    return result["hashes"]
+
+
+def _compute_perceptual_hash_value(file_path, use_gpu=True, backend=None):
+    """Compute a perceptual hash with optional GPU acceleration and safe CPU fallback."""
+    if not HAS_PILLOW or Image is None or imagehash is None:
+        return None
+
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in _PERCEPTUAL_IMAGE_EXTENSIONS:
+        return None
+
+    accelerator = globals().get("_gpu_accel")
+    if use_gpu and HAS_CUDA and accelerator is not None:
+        try:
+            hashes = _call_gpu_perceptual_batch([file_path], batch_size=1, timeout_seconds=8.0)
+            if hashes and hashes[0]:
+                return hashes[0]
+        except Exception:
+            pass
+
+    with Image.open(file_path) as img:
+        img_gray = img.convert('L').resize((32, 32))
+        return str(imagehash.phash(img_gray))
+
+
 def compute_perceptual_hash_worker(file_path):
     """Worker function for perceptual hash computation (GPU-accelerated when available)"""
     try:
-        if not HAS_PILLOW:
-            return (file_path, None)
-        
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext not in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']:
-            return (file_path, None)
-        
-        img = Image.open(file_path)
-        
-        # GPU-accelerated perceptual hashing
-        if HAS_CUDA and CUDA_BACKEND == 'cupy':
-            # Use CuPy for GPU acceleration
-            img_gray = img.convert('L').resize((32, 32))
-            img_array = np.array(img_gray, dtype=np.float32)
-            gpu_array = cp.asarray(img_array)
-            
-            # GPU-based DCT approximation using FFT
-            fft_result = cp.fft.fft2(gpu_array)
-            dct_approx = cp.real(fft_result)[:8, :8]
-            median_val = cp.median(dct_approx)
-            binary_hash = (dct_approx > median_val).flatten()
-            hash_str = ''.join('1' if b else '0' for b in cp.asnumpy(binary_hash))
-            return (file_path, hash_str)
-            
-        elif HAS_CUDA and CUDA_BACKEND == 'torch':
-            # Use PyTorch CUDA for GPU acceleration
-            img_gray = img.convert('L').resize((32, 32))
-            img_array = np.array(img_gray, dtype=np.float32)
-            gpu_tensor = torch_module.from_numpy(img_array).cuda()
-            
-            # GPU-based FFT for DCT approximation
-            fft_result = torch_module.fft.fft2(gpu_tensor)
-            dct_approx = torch_module.real(fft_result)[:8, :8]
-            median_val = torch_module.median(dct_approx)
-            binary_hash = (dct_approx > median_val).flatten()
-            hash_str = ''.join('1' if b else '0' for b in binary_hash.cpu().numpy())
-            return (file_path, hash_str)
-        else:
-            # CPU fallback using imagehash
-            phash = imagehash.phash(img)
-            return (file_path, str(phash))
-            
-    except Exception as e:
+        return (file_path, _compute_perceptual_hash_value(file_path, use_gpu=True, backend=CUDA_BACKEND))
+    except Exception:
         return (file_path, None)
 
 
 class GPUHasher:
     """GPU-accelerated batch hash computation"""
     
-    def __init__(self):
-        self.cuda_available = HAS_CUDA
-        self.backend = CUDA_BACKEND
+    def __init__(self, use_gpu=True, backend=None):
+        self.cuda_available = bool(use_gpu and HAS_CUDA)
+        self.backend = backend or CUDA_BACKEND
+        self.accelerator = globals().get("_gpu_accel")
+        self._gpu_hash_viable = None
+
+    def _probe_gpu_hashing(self, image_paths, batch_size):
+        """Quickly verify whether the GPU perceptual hasher is responsive."""
+        if self._gpu_hash_viable is not None:
+            return self._gpu_hash_viable
+        if not self.cuda_available or self.accelerator is None or not image_paths:
+            self._gpu_hash_viable = False
+            return False
+
+        probe_size = min(len(image_paths), max(1, min(batch_size, 4)))
+        probe_paths = image_paths[:probe_size]
+        probe_hashes = _call_gpu_perceptual_batch(
+            probe_paths,
+            batch_size=probe_size,
+            timeout_seconds=5.0,
+        )
+        self._gpu_hash_viable = bool(probe_hashes and len(probe_hashes) == probe_size)
+        if not self._gpu_hash_viable:
+            logger.warning(
+                "GPU perceptual hashing probe failed for %d image(s); using CPU hashing for this scan",
+                probe_size,
+            )
+        return self._gpu_hash_viable
         
-    def batch_hash_images_gpu(self, image_paths, batch_size=32):
-        """Compute perceptual hashes for batch of images using GPU"""
-        if not self.cuda_available or not HAS_PILLOW:
-            return self._batch_hash_cpu(image_paths)
-        
-        results = {}
-        
-        try:
-            for i in range(0, len(image_paths), batch_size):
-                batch = image_paths[i:i + batch_size]
-                batch_results = self._process_batch_gpu(batch)
-                results.update(batch_results)
-                
-                # Clear GPU memory periodically
-                if i % (batch_size * 4) == 0:
-                    self._clear_gpu_memory()
-                    
-        except Exception as e:
-            logger.error(f"GPU batch processing failed: {e}, falling back to CPU")
-            return self._batch_hash_cpu(image_paths)
-        
-        return results
-    
-    def _process_batch_gpu(self, image_paths):
-        """Process batch of images on GPU"""
-        results = {}
-        gpu_images = []
-        valid_paths = []
-        
-        for path in image_paths:
+    def batch_hash_images(self, image_paths, batch_size=32):
+        """Compute perceptual hashes for a batch of images."""
+        results = {path: None for path in image_paths}
+        batch_size = max(1, int(batch_size or 1))
+
+        if self.accelerator is not None:
             try:
-                if not os.path.exists(path):
-                    results[path] = None
-                    continue
-                
-                ext = os.path.splitext(path)[1].lower()
-                if ext not in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']:
-                    results[path] = None
-                    continue
-                
-                img = Image.open(path).convert('L').resize((32, 32))
-                img_array = np.array(img, dtype=np.float32)
-                
-                if self.backend == 'cupy':
-                    gpu_img = cp.asarray(img_array)
-                elif self.backend == 'torch':
-                    gpu_img = torch_module.from_numpy(img_array).cuda()
-                else:
-                    continue
-                    
-                gpu_images.append(gpu_img)
-                valid_paths.append(path)
-                
-            except Exception as e:
-                results[path] = None
-        
-        if not gpu_images:
-            return results
-        
-        try:
-            if self.backend == 'cupy':
-                batch_tensor = cp.stack(gpu_images)
-                fft_results = cp.fft.fft2(batch_tensor)
-                dct_approx = cp.real(fft_results)[:, :8, :8]
-                
-                for idx, path in enumerate(valid_paths):
-                    img_dct = dct_approx[idx]
-                    median_val = cp.median(img_dct)
-                    binary_hash = (img_dct > median_val).flatten()
-                    hash_str = ''.join('1' if b else '0' for b in cp.asnumpy(binary_hash))
-                    results[path] = hash_str
-                    
-            elif self.backend == 'torch':
-                batch_tensor = torch_module.stack(gpu_images)
-                fft_results = torch_module.fft.fft2(batch_tensor)
-                dct_approx = torch_module.real(fft_results)[:, :8, :8]
-                
-                for idx, path in enumerate(valid_paths):
-                    img_dct = dct_approx[idx]
-                    median_val = torch_module.median(img_dct)
-                    binary_hash = (img_dct > median_val).flatten()
-                    hash_str = ''.join('1' if b else '0' for b in binary_hash.cpu().numpy())
-                    results[path] = hash_str
-                    
-        except Exception as e:
-            logger.error(f"GPU batch error: {e}")
-            for path in valid_paths:
-                if path not in results:
-                    results[path] = None
-        
-        return results
-    
-    def _batch_hash_cpu(self, image_paths):
-        """CPU fallback for batch hashing"""
-        results = {}
-        for path in image_paths:
-            try:
-                if HAS_PILLOW:
-                    ext = os.path.splitext(path)[1].lower()
-                    if ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']:
-                        img = Image.open(path)
-                        phash = imagehash.phash(img)
-                        results[path] = str(phash)
+                if self.cuda_available:
+                    if self._probe_gpu_hashing(image_paths, batch_size):
+                        hashes = self.accelerator.batch_perceptual_hash_gpu(
+                            image_paths,
+                            batch_size=batch_size,
+                        )
                     else:
-                        results[path] = None
+                        hashes = self.accelerator._batch_perceptual_hash_cpu(image_paths)
                 else:
-                    results[path] = None
+                    hashes = self.accelerator._batch_perceptual_hash_cpu(image_paths)
+                for path, hash_value in zip(image_paths, hashes):
+                    results[path] = hash_value or None
+                return results
+            except Exception as e:
+                logger.warning(f"Accelerator perceptual hashing failed, falling back to local path: {e}")
+
+        for path in image_paths:
+            try:
+                results[path] = _compute_perceptual_hash_value(
+                    path,
+                    use_gpu=self.cuda_available,
+                    backend=self.backend,
+                )
             except Exception:
                 results[path] = None
+
         return results
     
     def _clear_gpu_memory(self):
@@ -1320,7 +1456,16 @@ class EnhancedScanThread(QThread):
     files_processed = pyqtSignal(int, int)  # processed, total
     gpu_status = pyqtSignal(str)  # GPU status updates
     
-    def __init__(self, directory, comparison_settings, scan_filters=None, use_parallel=True, use_gpu=True):
+    def __init__(
+        self,
+        directory,
+        comparison_settings,
+        scan_filters=None,
+        use_parallel=True,
+        use_gpu=True,
+        use_gpu_hashing=True,
+        gpu_batch_size=32,
+    ):
         super().__init__()
         self.directory = directory
         self.comparison_settings = comparison_settings
@@ -1330,8 +1475,14 @@ class EnhancedScanThread(QThread):
         self.start_time = None
         self.use_parallel = use_parallel
         self.use_gpu = use_gpu and HAS_CUDA
-        self.gpu_hasher = GPUHasher() if self.use_gpu else None
+        self.use_gpu_hashing = bool(self.use_gpu and use_gpu_hashing)
+        self.gpu_batch_size = _resolve_gpu_batch_size(gpu_batch_size)
+        self.gpu_hasher = GPUHasher(use_gpu=self.use_gpu_hashing, backend=CUDA_BACKEND)
+        self.audio_quality_analyzer = AudioQualityAnalyzer()
         self.media_profiles = merge_media_profiles(self.comparison_settings.get("media_profiles"))
+        self.phase_timings = {}
+        self._phase1_audio_fp_cache = {}
+        self._phase1_image_hash_cache = {}
     
     def pause(self):
         self.is_paused = True
@@ -1347,6 +1498,217 @@ class EnhancedScanThread(QThread):
         while self.is_paused and not self.is_cancelled:
             time.sleep(0.1)
         return self.is_cancelled
+
+    def _build_audio_candidate_pairs(self, audio_files, audio_fp_cache, size_cache, audio_metadata_cache=None):
+        """
+        Build a reduced audio candidate set for large libraries.
+
+        Same-track matches in real music libraries usually share either a
+        normalized title or a very similar duration/size profile. Bucketing on
+        those signals gives much better recall than a hard global pair cap.
+        """
+        title_buckets = defaultdict(set)
+        duration_size_buckets = defaultdict(set)
+
+        for file_path in audio_files:
+            fp = audio_fp_cache.get(file_path) or {}
+            duration = fp.get("duration")
+            duration_bucket = int(duration // 3) if duration else None
+            for title_key in FileComparator.audio_title_variants(file_path):
+                if duration_bucket is None:
+                    title_buckets[(title_key, None)].add(file_path)
+                else:
+                    for nearby_bucket in (duration_bucket - 1, duration_bucket, duration_bucket + 1):
+                        title_buckets[(title_key, nearby_bucket)].add(file_path)
+            metadata = (audio_metadata_cache or {}).get(file_path) or {}
+            meta_title = FileComparator.normalized_name(metadata.get("title") or "")
+            meta_artist = FileComparator.normalized_name(metadata.get("artist") or "")
+            if len(meta_title) >= 6:
+                bucket_key = meta_title if not meta_artist else f"{meta_artist}:{meta_title}"
+                if duration_bucket is None:
+                    title_buckets[(bucket_key, None)].add(file_path)
+                else:
+                    for nearby_bucket in (duration_bucket - 1, duration_bucket, duration_bucket + 1):
+                        title_buckets[(bucket_key, nearby_bucket)].add(file_path)
+
+            if duration_bucket is not None:
+                size_value = size_cache.get(file_path) or 0
+                size_bucket = int(size_value / (2 * 1024 * 1024))
+                duration_size_buckets[(duration_bucket, size_bucket)].add(file_path)
+
+        pair_set = set()
+
+        def add_bucket_pairs(bucket_files, max_bucket_size):
+            unique_files = sorted(bucket_files)
+            if len(unique_files) < 2 or len(unique_files) > max_bucket_size:
+                return
+            for index, file1 in enumerate(unique_files):
+                for file2 in unique_files[index + 1:]:
+                    pair_set.add((file1, file2))
+
+        for bucket_files in title_buckets.values():
+            add_bucket_pairs(bucket_files, max_bucket_size=64)
+
+        for bucket_files in duration_size_buckets.values():
+            add_bucket_pairs(bucket_files, max_bucket_size=18)
+
+        return sorted(pair_set)
+
+    def _append_perceptual_image_matches(
+        self,
+        comparison_files,
+        duplicate_group_lookup,
+        media_type_cache,
+        similar_files,
+    ):
+        """
+        Reuse Phase-1 perceptual hashes for image similarity instead of reopening
+        every image pair during Phase-2.
+        """
+        image_hash_cache = getattr(self, "_phase1_image_hash_cache", {}) or {}
+        image_paths = []
+        image_hash_ints = []
+
+        for file_path in comparison_files:
+            if media_type_cache.get(file_path) != "images":
+                continue
+            hash_int = _perceptual_hash_to_int(image_hash_cache.get(file_path))
+            if hash_int is None:
+                continue
+            image_paths.append(file_path)
+            image_hash_ints.append(hash_int)
+
+        image_path_set = set(image_paths)
+        total_pairs = len(image_paths) * (len(image_paths) - 1) // 2
+        if total_pairs == 0:
+            return image_path_set, total_pairs
+
+        threshold = 10
+        if PHashThresholds is not None:
+            try:
+                threshold = int(PHashThresholds.get_threshold("images"))
+            except Exception:
+                threshold = 10
+
+        self.status_update.emit(
+            f"Finding similar images via perceptual hashes ({len(image_paths):,} images, {total_pairs:,} pairs)..."
+        )
+
+        for i, file1 in enumerate(image_paths):
+            hash1 = image_hash_ints[i]
+            group1 = duplicate_group_lookup.get(file1, [file1])
+
+            for j in range(i + 1, len(image_paths)):
+                dist = (hash1 ^ image_hash_ints[j]).bit_count()
+                if dist > threshold:
+                    continue
+
+                file2 = image_paths[j]
+                similarity = 1.0 - (dist / 64.0)
+                similarity_reasons = [f"phash {similarity:.0%} (Hamming {dist})"]
+                group2 = duplicate_group_lookup.get(file2, [file2])
+
+                for member1 in group1:
+                    for member2 in group2:
+                        if member1 == member2:
+                            continue
+                        key = f"similar_{len(similar_files)}"
+                        similar_files[key] = {
+                            'files': [member1, member2],
+                            'reasons': list(similarity_reasons),
+                            'match_type': "content",
+                            'audio_match': None,
+                        }
+
+        return image_path_set, total_pairs
+
+    def _classify_audio_similarity(self, file1, file2, details, similarity, size1=None, size2=None, meta1=None, meta2=None):
+        """Return structured audio similarity metadata or None."""
+        chromaprint_score = details.get("chromaprint_score") or 0.0
+        mfcc_score = details.get("mfcc_score") or 0.0
+        combined_score = details.get("combined_score")
+        duration_ratio = details.get("duration_match")
+        title_match = FileComparator.audio_title_match(file1, file2)
+        meta_title_match = False
+        meta_artist_match = False
+        if meta1 and meta2:
+            title1 = FileComparator.normalized_name(meta1.get("title") or "")
+            title2 = FileComparator.normalized_name(meta2.get("title") or "")
+            artist1 = FileComparator.normalized_name(meta1.get("artist") or "")
+            artist2 = FileComparator.normalized_name(meta2.get("artist") or "")
+            meta_title_match = bool(title1 and title2 and title1 == title2)
+            meta_artist_match = bool(artist1 and artist2 and artist1 == artist2)
+        score = max(similarity or 0.0, chromaprint_score, mfcc_score, combined_score or 0.0)
+
+        if details.get("strict_match") and (duration_ratio is None or duration_ratio >= 0.97):
+            return {
+                "tier": "strict_recording_match",
+                "score": score,
+                "chromaprint_score": chromaprint_score,
+                "mfcc_score": mfcc_score,
+                "combined_score": combined_score,
+                "duration_ratio": duration_ratio,
+                "title_match": title_match,
+                "label": "100% Audio Match",
+                "reason": f"100% audio match ({score:.0%} via {details.get('method_used', 'hybrid')})",
+            }
+
+        if (
+            details.get("near_match")
+            and (title_match or meta_title_match)
+            and (duration_ratio is None or duration_ratio >= 0.94)
+        ):
+            return {
+                "tier": "same_song_match",
+                "score": score,
+                "chromaprint_score": chromaprint_score,
+                "mfcc_score": mfcc_score,
+                "combined_score": combined_score,
+                "duration_ratio": duration_ratio,
+                "title_match": title_match or meta_title_match,
+                "label": "Same Song Match",
+                "reason": f"Same song match ({score:.0%} acoustic + title)",
+            }
+
+        # FIXED: Require artist match when using audio_copy_name_match
+        # The function now properly checks both artist AND title
+        if FileComparator.audio_copy_name_match(file1, file2):
+            size_close = False
+            if size1 and size2:
+                size_close = abs(size1 - size2) <= max(256 * 1024, int(max(size1, size2) * 0.02))
+            if size_close or (duration_ratio is not None and duration_ratio >= 0.985):
+                return {
+                    "tier": "same_song_match",
+                    "score": score,
+                    "chromaprint_score": chromaprint_score,
+                    "mfcc_score": mfcc_score,
+                    "combined_score": combined_score,
+                    "duration_ratio": duration_ratio,
+                    "title_match": True,
+                    "label": "Same Song Match",
+                    "reason": "Same song match (duplicate-style filename)",
+                }
+
+        # FIXED: For audio tags match, require BOTH title AND artist to match
+        # Different artists with same song title (e.g., "Hold On" by different artists) are NOT duplicates
+        if meta_title_match and meta_artist_match:
+            size_close = False
+            if size1 and size2:
+                size_close = abs(size1 - size2) <= max(512 * 1024, int(max(size1, size2) * 0.05))
+            if size_close or (duration_ratio is not None and duration_ratio >= 0.98):
+                return {
+                    "tier": "same_song_match",
+                    "score": score,
+                    "chromaprint_score": chromaprint_score,
+                    "mfcc_score": mfcc_score,
+                    "combined_score": combined_score,
+                    "duration_ratio": duration_ratio,
+                    "title_match": True,
+                    "label": "Same Song Match",
+                    "reason": "Same song match (audio tags)",
+                }
+
+        return None
         
     def run(self):
         self.start_time = time.time()
@@ -1377,6 +1739,7 @@ class EnhancedScanThread(QThread):
         self.files_processed.emit(0, total_files)
         
         # Phase 1: Find exact duplicates by hash using parallel processing
+        phase1_started_at = time.perf_counter()
         try:
             if self.use_parallel and total_files > 100:
                 file_hashes = self._parallel_hash_computation(files, total_files)
@@ -1387,6 +1750,9 @@ class EnhancedScanThread(QThread):
             import traceback
             traceback.print_exc()
             file_hashes = {}
+        phase1_elapsed = time.perf_counter() - phase1_started_at
+        self.phase_timings["hashing"] = phase1_elapsed
+        logger.info("Phase 1 hashing completed in %.2fs for %d files", phase1_elapsed, total_files)
         
         if self.is_cancelled:
             return
@@ -1399,10 +1765,12 @@ class EnhancedScanThread(QThread):
         duplicates = {k: v for k, v in file_hashes.items() if len(v) > 1}
         
         # Phase 2: Find similar files (not exact duplicates)
-        self.status_update.emit("Finding similar files...")
+        self.status_update.emit(f"Hashing complete in {phase1_elapsed:.1f}s. Finding similar files...")
         similar_files = {}
+        similarity_elapsed = 0.0
         
         if self.comparison_settings['find_similar']:
+            phase2_started_at = time.perf_counter()
             try:
                 similar_files = self.find_similar_files(files, duplicates)
             except MemoryError:
@@ -1411,10 +1779,19 @@ class EnhancedScanThread(QThread):
             except Exception as e:
                 logger.error("Similarity scan crashed (%s): %s", type(e).__name__, e, exc_info=True)
                 self.status_update.emit(f"Warning: Similarity scan stopped ({type(e).__name__})")
+            similarity_elapsed = time.perf_counter() - phase2_started_at
+        self.phase_timings["similarity"] = similarity_elapsed
+        logger.info(
+            "Phase 2 similarity completed in %.2fs (%s)",
+            similarity_elapsed,
+            "enabled" if self.comparison_settings['find_similar'] else "skipped",
+        )
         
         self.progress.emit(100)
         elapsed = time.time() - self.start_time
-        self.status_update.emit(f"Analysis complete in {elapsed:.1f}s!")
+        self.status_update.emit(
+            f"Analysis complete in {elapsed:.1f}s (hashing {phase1_elapsed:.1f}s, similarity {similarity_elapsed:.1f}s)!"
+        )
         self.finished.emit(duplicates, similar_files)
     
     def _parallel_hash_computation(self, files, total_files):
@@ -1453,11 +1830,27 @@ class EnhancedScanThread(QThread):
         processed = 0
         
         # GPU batch processing for images if perceptual hashing
-        if self.use_gpu and image_files and hash_type == 'Perceptual':
-            self.status_update.emit(f"GPU processing {len(image_files)} images...")
-            gpu_results = self.gpu_hasher.batch_hash_images_gpu(image_files, batch_size=64)
-            
-            for path, hash_val in gpu_results.items():
+        if image_files and hash_type == 'Perceptual':
+            if self.use_gpu_hashing:
+                self.status_update.emit(f"GPU processing {len(image_files)} images...")
+            else:
+                self.status_update.emit(f"CPU processing {len(image_files)} images (perceptual hashing)...")
+
+            image_results = self.gpu_hasher.batch_hash_images(
+                image_files,
+                batch_size=self.gpu_batch_size,
+            )
+            if self.use_gpu_hashing and self.gpu_hasher._gpu_hash_viable is False:
+                self.status_update.emit(
+                    f"GPU perceptual hashing unavailable for this scan; switched to CPU hashing for {len(image_files)} images."
+                )
+            self._phase1_image_hash_cache = {
+                path: hash_val
+                for path, hash_val in image_results.items()
+                if hash_val
+            }
+
+            for path, hash_val in image_results.items():
                 if self.is_cancelled:
                     return file_hashes
                 if hash_val:
@@ -1533,22 +1926,12 @@ class EnhancedScanThread(QThread):
                         _phase1_cache[path] = fingerprint
                         self.current_file.emit(os.path.basename(path))
 
-                        if fingerprint:
-                            # Create a unique hash from the fingerprint
-                            # Combine chromaprint and mfcc for a robust identifier
-                            fp_parts = []
-                            if fingerprint.get('chromaprint'):
-                                fp_parts.append(f"cp:{fingerprint['chromaprint'][:32]}")
-                            if fingerprint.get('mfcc'):
-                                # Use first few MFCC values as a hash
-                                mfcc = fingerprint['mfcc']
-                                if isinstance(mfcc, list) and len(mfcc) >= 4:
-                                    mfcc_hash = "_".join(f"{v:.2f}" for v in mfcc[:4])
-                                    fp_parts.append(f"mfcc:{mfcc_hash}")
-
-                            if fp_parts:
-                                audio_hash = f"audio:{'|'.join(fp_parts)}"
-                                file_hashes[audio_hash].append(path)
+                        # Phase-1 should only mark exact file duplicates.
+                        # Acoustic fingerprints are reused in Phase-2 similarity matching.
+                        exact_hash_name = get_profile_for_path(path, self.media_profiles).get("exact_hash", "XXH3_128")
+                        exact_hash = compute_exact_hash(path, exact_hash_name)
+                        if exact_hash:
+                            file_hashes[f"audio_exact:{exact_hash}"].append(path)
 
                         processed += 1
                         progress = int((processed / total_files) * 50)
@@ -1614,7 +1997,7 @@ class EnhancedScanThread(QThread):
                 other_files.extend(text_files)
         
         # Parallel processing for other files using ThreadPoolExecutor
-        mode_str = "GPU mode" if HAS_CUDA else "CPU mode"
+        mode_str = "GPU mode" if self.use_gpu else "CPU mode"
         self.status_update.emit(f"Parallel processing {len(other_files)} files with {OPTIMAL_WORKERS} workers ({mode_str})...")
         
         hash_tasks = [
@@ -1631,14 +2014,15 @@ class EnhancedScanThread(QThread):
             
             for future in as_completed(futures):
                 if self.is_cancelled:
-                    executor.shutdown(wait=False)
+                    # MAIN-FIX: Use wait=True to properly clean up pending tasks
+                    executor.shutdown(wait=True, cancel_futures=True)
                     return file_hashes
                 
                 # Handle pause
                 while self.is_paused:
                     time.sleep(0.1)
                     if self.is_cancelled:
-                        executor.shutdown(wait=False)
+                        executor.shutdown(wait=True, cancel_futures=True)
                         return file_hashes
                 
                 try:
@@ -1655,7 +2039,7 @@ class EnhancedScanThread(QThread):
                         self.files_processed.emit(processed, total_files)
                         
                         # Calculate ETA
-                        elapsed = time.time() - self.start_time
+                        elapsed = max(time.time() - self.start_time, 0.001)
                         if processed > 0:
                             rate = processed / elapsed
                             remaining = (total_files - processed) / rate if rate > 0 else 0
@@ -1694,7 +2078,7 @@ class EnhancedScanThread(QThread):
                 
                 # Calculate and emit ETA
                 if i > 0:
-                    elapsed = time.time() - self.start_time
+                    elapsed = max(time.time() - self.start_time, 0.001)
                     rate = (i + 1) / elapsed
                     remaining = (total_files - i - 1) / rate if rate > 0 else 0
                     eta = timedelta(seconds=int(remaining))
@@ -1751,38 +2135,32 @@ class EnhancedScanThread(QThread):
         """Find similar (but not identical) files"""
         similar_files = defaultdict(list)
 
-        # Get list of files that are not already exact duplicates
+        # Track exact-duplicate groups so Phase-2 can compare one representative
+        # from each group against other files, then fan out accepted matches.
         duplicate_files = set()
+        duplicate_group_lookup = {}
+        representative_files = []
         for file_list in duplicates.values():
             duplicate_files.update(file_list)
+            if file_list:
+                rep = file_list[0]
+                representative_files.append(rep)
+                duplicate_group_lookup[rep] = list(file_list)
 
         non_duplicate_files = [f for f in files if f not in duplicate_files]
+        comparison_files = representative_files + non_duplicate_files
 
         settings = self.comparison_settings
         hash_type = settings.get('hash_type', 'MD5')
-        total_comparisons = len(non_duplicate_files) * (len(non_duplicate_files) - 1) // 2
         phase2_started_at = time.time()
-
-        # FIX-B: With N files the pairwise loop is O(n²). For large directories
-        # (e.g. 42K files → ~895M pairs) this runs indefinitely and makes the UI
-        # appear frozen. Cap at 1M pairs and warn the user so Phase 2 always
-        # completes in a reasonable time. The exact-duplicate phase (Phase 1) is
-        # unaffected — all true duplicates are already found via hashing.
-        _MAX_PAIRS = 1_000_000
-        if total_comparisons > _MAX_PAIRS:
-            self.status_update.emit(
-                f"⚠ Similarity: {len(non_duplicate_files):,} files → "
-                f"{total_comparisons:,} pairs exceeds limit. "
-                f"Checking first {_MAX_PAIRS:,} pairs only. "
-                "Disable 'Find Similar' for full-directory scans."
-            )
-            total_comparisons = _MAX_PAIRS
         comparison_count = 0
 
         # Define extension sets once outside the O(n²) loop (M-5 fix)
         video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpeg', '.mpg'}
         audio_extensions = {'.mp3', '.flac', '.wav', '.aac', '.ogg', '.wma', '.m4a', '.opus', '.aiff', '.ape', '.alac', '.wv'}
-        enable_audio_similarity = hash_type == 'Audio' and HAS_AUDIO_FINGERPRINTER
+        # Audio fingerprinting runs whenever available, regardless of hash preset.
+        # Previously gated on hash_type == 'Audio' — prevented M4A/MP3 detection under MD5/SHA256.
+        enable_audio_similarity = HAS_AUDIO_FINGERPRINTER
         enable_video_similarity = hash_type == 'Perceptual' and HAS_VIDEO_FINGERPRINTER
 
         # AF-3: Pre-compute fingerprints ONCE per unique file before the O(n²) loop.
@@ -1798,13 +2176,13 @@ class EnhancedScanThread(QThread):
         if enable_audio_similarity:
             # Only queue files whose fingerprint was not carried over from Phase 1
             audio_candidates = [
-                f for f in non_duplicate_files
+                f for f in comparison_files
                 if os.path.splitext(f)[1].lower() in audio_extensions
                 and f not in audio_fp_cache
             ]
         if enable_video_similarity:
             video_candidates = [
-                f for f in non_duplicate_files
+                f for f in comparison_files
                 if os.path.splitext(f)[1].lower() in video_extensions
             ]
 
@@ -1844,27 +2222,104 @@ class EnhancedScanThread(QThread):
         # AF-4: Pre-compute per-file derived properties — extension, media type, and
         # profile only depend on the file path yet were being computed O(n²) times inside
         # the inner loop.  Building these dicts once reduces that to O(n).
-        ext_cache = {f: os.path.splitext(f)[1].lower() for f in non_duplicate_files}
-        media_type_cache = {f: get_media_type(f) for f in non_duplicate_files}
-        profile_cache = {f: get_profile_for_path(f, self.media_profiles) for f in non_duplicate_files}
-        basename_cache = {f: os.path.basename(f).lower() for f in non_duplicate_files}
-        stem_cache = {f: os.path.splitext(basename_cache[f])[0] for f in non_duplicate_files}
-        normalized_name_cache = {f: FileComparator.normalized_name(stem_cache[f]) for f in non_duplicate_files}
+        ext_cache = {f: os.path.splitext(f)[1].lower() for f in comparison_files}
+        media_type_cache = {f: get_media_type(f) for f in comparison_files}
+        profile_cache = {f: get_profile_for_path(f, self.media_profiles) for f in comparison_files}
+        basename_cache = {f: os.path.basename(f).lower() for f in comparison_files}
+        stem_cache = {f: os.path.splitext(basename_cache[f])[0] for f in comparison_files}
+        normalized_name_cache = {f: FileComparator.normalized_name(stem_cache[f]) for f in comparison_files}
         size_cache = {}
-        for f in non_duplicate_files:
+        for f in comparison_files:
             try:
                 size_cache[f] = os.path.getsize(f)
             except OSError:
                 size_cache[f] = None
+        audio_metadata_cache = {}
+        if enable_audio_similarity:
+            for f in comparison_files:
+                if ext_cache[f] in audio_extensions:
+                    audio_metadata_cache[f] = self.audio_quality_analyzer.analyze_audio_quality(f) or {}
+
+        phash_image_paths = set()
+        image_pair_total = 0
+        if hash_type == 'Perceptual':
+            phash_image_paths, image_pair_total = self._append_perceptual_image_matches(
+                comparison_files,
+                duplicate_group_lookup,
+                media_type_cache,
+                similar_files,
+            )
+
+        audio_only_scan = enable_audio_similarity and comparison_files and all(
+            media_type_cache[f] == "audio" for f in comparison_files
+        )
+        pair_candidates = None
+        if audio_only_scan:
+            pair_candidates = self._build_audio_candidate_pairs(
+                comparison_files,
+                audio_fp_cache,
+                size_cache,
+                audio_metadata_cache=audio_metadata_cache,
+            )
+            total_comparisons = len(pair_candidates)
+            self.status_update.emit(
+                f"Finding similar files... built {total_comparisons:,} audio candidate pairs"
+            )
+        else:
+            total_comparisons = len(comparison_files) * (len(comparison_files) - 1) // 2
 
         self.files_processed.emit(0, total_comparisons)
         self.eta_update.emit("Similarity ETA: calculating...")
 
-        for i, file1 in enumerate(non_duplicate_files):
+        if pair_candidates is not None:
+            pair_iterator = pair_candidates
+        else:
+            pair_iterator = (
+                (file1, file2)
+                for i, file1 in enumerate(comparison_files)
+                for file2 in comparison_files[i + 1:]
+                if not (file1 in phash_image_paths and file2 in phash_image_paths)
+            )
+
+        comparison_count = image_pair_total
+        if comparison_count and total_comparisons:
+            progress = phase2_start + int((comparison_count / total_comparisons) * phase2_span)
+            self.progress.emit(min(progress, 95))
+            self.files_processed.emit(comparison_count, total_comparisons)
+            elapsed = max(time.time() - phase2_started_at, 0.001)
+            rate = comparison_count / elapsed
+            remaining = max(total_comparisons - comparison_count, 0)
+            eta_seconds = int(remaining / rate) if rate > 0 else 0
+            self.eta_update.emit(f"Similarity ETA: {timedelta(seconds=eta_seconds)}")
+
+        for file1, file2 in pair_iterator:
             if self._pause_or_cancel_requested():
                 return dict(similar_files)
-            # AF-4: file1 properties only depend on file1 — constant across all j
-            # pairings. Compute once per outer iteration, not once per inner iteration.
+            comparison_count += 1
+
+            if comparison_count % 100 == 0:
+                if total_comparisons:
+                    progress = phase2_start + int((comparison_count / total_comparisons) * phase2_span)
+                else:
+                    progress = 95
+                self.progress.emit(min(progress, 95))
+            if comparison_count % 5000 == 0 or comparison_count == 1:
+                self.files_processed.emit(comparison_count, total_comparisons)
+                elapsed = max(time.time() - phase2_started_at, 0.001)
+                rate = comparison_count / elapsed
+                remaining = max(total_comparisons - comparison_count, 0)
+                eta_seconds = int(remaining / rate) if rate > 0 else 0
+                self.status_update.emit(
+                    f"Finding similar files... checked {comparison_count:,}/{total_comparisons:,} pairs"
+                )
+                self.eta_update.emit(f"Similarity ETA: {timedelta(seconds=eta_seconds)}")
+
+            is_similar = False
+            similarity_reasons = []
+            name_similar = False
+            size_similar = False
+            audio_match_data = None
+
             ext1 = ext_cache[file1]
             media_type1 = media_type_cache[file1]
             profile1 = profile_cache[file1]
@@ -1872,188 +2327,178 @@ class EnhancedScanThread(QThread):
             stem1 = stem_cache[file1]
             normalized1 = normalized_name_cache[file1]
             size1 = size_cache[file1]
-            for j, file2 in enumerate(non_duplicate_files[i+1:], i+1):
-                if self._pause_or_cancel_requested():
-                    return dict(similar_files)
-                comparison_count += 1
 
-                # FIX-B: hard cap — stop once we've checked enough pairs
-                if comparison_count >= _MAX_PAIRS:
-                    self.status_update.emit(
-                        f"Similarity scan: {_MAX_PAIRS:,} pair limit reached."
-                    )
-                    self.progress.emit(95)
-                    return dict(similar_files)
+            media_type2 = media_type_cache[file2]
+            shared_media_type = media_type1 if media_type1 == media_type2 else None
+            profile = profile1 if shared_media_type else None
+            ext2 = ext_cache[file2]
+            basename2 = basename_cache[file2]
+            stem2 = stem_cache[file2]
+            normalized2 = normalized_name_cache[file2]
+            size2 = size_cache[file2]
 
-                # Update progress (second 50%)
-                if comparison_count % 100 == 0:
-                    if total_comparisons:
-                        progress = phase2_start + int((comparison_count / total_comparisons) * phase2_span)
-                    else:
-                        progress = 95
-                    self.progress.emit(min(progress, 95))
-                if comparison_count % 5000 == 0 or comparison_count == 1:
-                    self.files_processed.emit(comparison_count, total_comparisons)
-                    elapsed = max(time.time() - phase2_started_at, 0.001)
-                    rate = comparison_count / elapsed
-                    remaining = max(total_comparisons - comparison_count, 0)
-                    eta_seconds = int(remaining / rate) if rate > 0 else 0
-                    self.status_update.emit(
-                        f"Finding similar files... checked {comparison_count:,}/{total_comparisons:,} pairs"
-                    )
-                    self.eta_update.emit(f"Similarity ETA: {timedelta(seconds=eta_seconds)}")
-
-                is_similar = False
-                similarity_reasons = []
-                name_similar = False
-                size_similar = False
-                media_type2 = media_type_cache[file2]
-                shared_media_type = media_type1 if media_type1 == media_type2 else None
-                profile = profile1 if shared_media_type else None
-                # ext1 is pre-fetched in the outer loop (constant for all j)
-                ext2 = ext_cache[file2]
-                basename2 = basename_cache[file2]
-                stem2 = stem_cache[file2]
-                normalized2 = normalized_name_cache[file2]
-                size2 = size_cache[file2]
-
-                if shared_media_type and profile and profile.get("enable_fuzzy", False):
-                    if shared_media_type == "images":
-                        try:
-                            image_match, image_score, image_reasons = compare_image_files(file1, file2, profile)
-                            if image_match:
-                                is_similar = True
-                                similarity_reasons.extend(image_reasons or [f"Similar image content ({image_score:.0%})"])
-                        except Exception:
-                            pass
-                    elif shared_media_type in {"documents", "code"}:
-                        try:
-                            doc_match, doc_score, doc_reasons = compare_document_files(
-                                file1,
-                                file2,
-                                profile,
-                                semantic_engine=semantic_engine if HAS_SEMANTIC_SIMILARITY else None,
-                            )
-                            if doc_match:
-                                is_similar = True
-                                similarity_reasons.extend(doc_reasons or [f"Similar document content ({doc_score:.0%})"])
-                        except Exception:
-                            pass
-                    elif shared_media_type == "archives":
-                        try:
-                            archive_match, archive_score, archive_reasons = compare_archive_files(file1, file2, profile)
-                            if archive_match:
-                                is_similar = True
-                                similarity_reasons.extend(archive_reasons or [f"Similar archive contents ({archive_score:.0%})"])
-                        except Exception:
-                            pass
-
-                if (
-                    ext1 in video_extensions
-                    and ext2 in video_extensions
-                    and enable_video_similarity
-                    and shared_media_type == "videos"
-                    and profile
-                    and profile.get("enable_fuzzy", False)
-                ):
+            if shared_media_type and profile and profile.get("enable_fuzzy", False):
+                if shared_media_type == "images":
                     try:
-                        fp1 = video_fp_cache.get(file1)
-                        fp2 = video_fp_cache.get(file2)
-                        
-                        if fp1 and fp2:
-                            is_sim, similarity, details = video_fingerprinter.are_videos_similar(
-                                fp1, fp2, threshold=0.7
-                            )
-                            if is_sim:
-                                is_similar = True
-                                similarity_reasons.append(f"Similar video content ({similarity:.0%})")
+                        image_match, image_score, image_reasons = compare_image_files(file1, file2, profile)
+                        if image_match:
+                            is_similar = True
+                            similarity_reasons.extend(image_reasons or [f"Similar image content ({image_score:.0%})"])
                     except Exception:
-                        pass  # Fall through to other comparison methods
-                
-                # Check for similar audio using audio fingerprinting
-                elif (
-                    ext1 in audio_extensions
-                    and ext2 in audio_extensions
-                    and enable_audio_similarity
-                    and shared_media_type == "audio"
-                    and profile
-                    and profile.get("enable_fuzzy", False)
-                ):
+                        pass
+                elif shared_media_type in {"documents", "code"}:
                     try:
-                        fp1 = audio_fp_cache.get(file1)
-                        fp2 = audio_fp_cache.get(file2)
-                        
-                        if fp1 and fp2:
-                            is_sim, similarity, details = audio_fingerprinter.compare_fingerprints(
-                                fp1, fp2, method="hybrid"
-                            )
-                            # AS-2: Trust the engine's determination only — no secondary
-                            # low-score fallback.  is_sim=True requires chromaprint≥0.92,
-                            # MFCC≥0.90, or hybrid-combined≥0.88 after a 3%-duration gate.
-                            if is_sim:
-                                is_similar = True
-                                method = details.get('method_used', 'hybrid')
-                                similarity_reasons.append(f"Similar audio ({similarity:.0%} via {method})")
+                        doc_match, doc_score, doc_reasons = compare_document_files(
+                            file1,
+                            file2,
+                            profile,
+                            semantic_engine=semantic_engine if HAS_SEMANTIC_SIMILARITY else None,
+                        )
+                        if doc_match:
+                            is_similar = True
+                            similarity_reasons.extend(doc_reasons or [f"Similar document content ({doc_score:.0%})"])
                     except Exception:
-                        pass  # Fall through to other comparison methods
-                
-                # Check various similarity criteria.
-                # AS-2: Skip all name/size/text comparisons for audio pairs — those
-                # signals are too noisy for music libraries (same song title ≠ same
-                # recording; different bitrate ≠ different song).  Only the acoustic
-                # fingerprint (above) is authoritative for audio.
-                if shared_media_type != "audio":
-                    if settings.get('compare_by_name', False):
-                        name_threshold = settings.get('name_similarity', 0.8)
-                        matcher = SequenceMatcher(None, basename1, basename2)
-                        if (
-                            matcher.real_quick_ratio() >= name_threshold
-                            and matcher.quick_ratio() >= name_threshold
-                            and matcher.ratio() >= name_threshold
-                        ):
-                            name_similar = True
-                        if name_similar:
+                        pass
+                elif shared_media_type == "archives":
+                    try:
+                        archive_match, archive_score, archive_reasons = compare_archive_files(file1, file2, profile)
+                        if archive_match:
                             is_similar = True
-                            similarity_reasons.append("Similar names")
+                            similarity_reasons.extend(archive_reasons or [f"Similar archive contents ({archive_score:.0%})"])
+                    except Exception:
+                        pass
 
-                    if settings.get('compare_by_size', False):
-                        tolerance_bytes = settings.get('size_tolerance', 1) * 1024 * 1024
-                        if size1 is not None and size2 is not None:
-                            size_similar = abs(size1 - size2) <= tolerance_bytes
-                        if size_similar:
+            if (
+                ext1 in video_extensions
+                and ext2 in video_extensions
+                and enable_video_similarity
+                and shared_media_type == "videos"
+                and profile
+                and profile.get("enable_fuzzy", False)
+            ):
+                try:
+                    fp1 = video_fp_cache.get(file1)
+                    fp2 = video_fp_cache.get(file2)
+                    if fp1 and fp2:
+                        is_sim, similarity, details = video_fingerprinter.are_videos_similar(
+                            fp1, fp2, threshold=0.7
+                        )
+                        if is_sim:
                             is_similar = True
-                            similarity_reasons.append("Similar sizes")
+                            similarity_reasons.append(f"Similar video content ({similarity:.0%})")
+                except Exception:
+                    pass
 
-                    # Same name but different size (explicit step)
-                    if name_similar and not size_similar:
-                        try:
-                            if stem1 == stem2 or (normalized1 and normalized1 == normalized2):
-                                if size1 is not None and size2 is not None and size1 != size2:
-                                    is_similar = True
-                                    similarity_reasons.append("Same name, different size")
-                        except Exception:
-                            pass
-
-                    if settings.get('compare_text_content', False):
-                        if FileComparator.compare_text_similarity(file1, file2, settings.get('content_similarity', 0.9)):
-                            is_similar = True
-                            similarity_reasons.append("Similar content")
-                
-                if is_similar:
-                    match_type = "name_size"
-                    if "Same name, different size" in similarity_reasons:
-                        match_type = "same_name_diff_size"
-                    if any(
-                        reason.startswith(("Similar audio", "Similar video", "Similar content", "lexical ", "archive ", "phash "))
-                        for reason in similarity_reasons
-                    ):
-                        match_type = "content"
-                    key = f"similar_{len(similar_files)}"
-                    similar_files[key] = {
-                        'files': [file1, file2],
-                        'reasons': similarity_reasons,
-                        'match_type': match_type
+            # Audio fingerprinting is NOT "fuzzy" text matching — enable_fuzzy should not gate it.
+            # Acoustic fingerprinting has its own strict thresholds (chromaprint ≥0.92, MFCC ≥0.90).
+            elif (
+                ext1 in audio_extensions
+                and ext2 in audio_extensions
+                and enable_audio_similarity
+                and shared_media_type == "audio"
+            ):
+                try:
+                    fp1 = audio_fp_cache.get(file1)
+                    fp2 = audio_fp_cache.get(file2)
+                    similarity = 0.0
+                    details = {
+                        "chromaprint_score": None,
+                        "mfcc_score": None,
+                        "method_used": None,
+                        "duration_match": None,
+                        "combined_score": None,
+                        "near_match": False,
+                        "strict_match": False,
                     }
+                    if fp1 and fp2:
+                        is_sim, similarity, details = audio_fingerprinter.compare_fingerprints(
+                            fp1, fp2, method="hybrid"
+                        )
+                    audio_match_data = self._classify_audio_similarity(
+                        file1,
+                        file2,
+                        details,
+                        similarity,
+                        size1=size1,
+                        size2=size2,
+                        meta1=audio_metadata_cache.get(file1),
+                        meta2=audio_metadata_cache.get(file2),
+                    )
+                    if audio_match_data:
+                        is_similar = True
+                        similarity_reasons.append(audio_match_data["reason"])
+                except Exception:
+                    pass
+
+            is_image_pair = shared_media_type == "images"
+
+            if shared_media_type != "audio" and not is_image_pair:
+                if settings.get('compare_by_name', False):
+                    name_threshold = settings.get('name_similarity', 0.8)
+                    matcher = SequenceMatcher(None, basename1, basename2)
+                    if (
+                        matcher.real_quick_ratio() >= name_threshold
+                        and matcher.quick_ratio() >= name_threshold
+                        and matcher.ratio() >= name_threshold
+                    ):
+                        name_similar = True
+                    if name_similar:
+                        is_similar = True
+                        similarity_reasons.append("Similar names")
+
+                if settings.get('compare_by_size', False):
+                    tolerance_bytes = settings.get('size_tolerance', 1) * 1024 * 1024
+                    if size1 is not None and size2 is not None:
+                        size_similar = abs(size1 - size2) <= tolerance_bytes
+                    if size_similar:
+                        is_similar = True
+                        similarity_reasons.append("Similar sizes")
+
+                if name_similar and not size_similar:
+                    try:
+                        if stem1 == stem2 or (normalized1 and normalized1 == normalized2):
+                            if size1 is not None and size2 is not None and size1 != size2:
+                                is_similar = True
+                                similarity_reasons.append("Same name, different size")
+                    except Exception:
+                        pass
+
+                if settings.get('compare_text_content', False):
+                    if FileComparator.compare_text_similarity(file1, file2, settings.get('content_similarity', 0.9)):
+                        is_similar = True
+                        similarity_reasons.append("Similar content")
+
+            if is_similar:
+                match_type = "name_size"
+                if audio_match_data:
+                    match_type = "content"
+                elif "Same name, different size" in similarity_reasons:
+                    match_type = "same_name_diff_size"
+                if any(
+                    reason.startswith((
+                        "Similar video",
+                        "Similar content",
+                        "lexical ",
+                        "archive ",
+                        "phash ",
+                        "Exact image content",
+                    ))
+                    for reason in similarity_reasons
+                ):
+                    match_type = "content"
+                group1 = duplicate_group_lookup.get(file1, [file1])
+                group2 = duplicate_group_lookup.get(file2, [file2])
+                for member1 in group1:
+                    for member2 in group2:
+                        if member1 == member2:
+                            continue
+                        key = f"similar_{len(similar_files)}"
+                        similar_files[key] = {
+                            'files': [member1, member2],
+                            'reasons': list(similarity_reasons),
+                            'match_type': match_type,
+                            'audio_match': audio_match_data,
+                        }
         self.files_processed.emit(total_comparisons, total_comparisons)
         self.eta_update.emit("Similarity ETA: 0:00:00")
         return dict(similar_files)
@@ -2087,34 +2532,14 @@ class EnterpriseConfigDialog(QDialog):
             status = QLabel("Advanced modules not installed - some features are unavailable")
             status.setStyleSheet("color: #ff9800; padding: 5px;")
         layout.addWidget(status)
+
+        info = QLabel("Maintained advanced options: GPU hashing, merge analysis, and undo retention.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #9fb3c8; padding: 0 5px 8px 5px;")
+        layout.addWidget(info)
         
         # Create tab widget for different configuration sections
         tabs = QTabWidget()
-        
-        # Database settings tab
-        db_tab = QWidget()
-        db_layout = QVBoxLayout(db_tab)
-        db_layout.setSpacing(10)
-        
-        self.use_database_cb = QCheckBox("Enable database persistence (cache file hashes)")
-        self.use_database_cb.setChecked(self.config.get("use_database", True))
-        self.use_database_cb.setEnabled(HAS_ENTERPRISE_MODULES)
-        db_layout.addWidget(self.use_database_cb)
-        
-        self.incremental_scan_cb = QCheckBox("Enable incremental scanning (skip unchanged files)")
-        self.incremental_scan_cb.setChecked(self.config.get("incremental_scan", True))
-        self.incremental_scan_cb.setEnabled(HAS_ENTERPRISE_MODULES)
-        db_layout.addWidget(self.incremental_scan_cb)
-        
-        db_path_layout = QHBoxLayout()
-        db_path_layout.addWidget(QLabel("Database path:"))
-        self.db_path_edit = QLineEdit(self.config.get("db_path", "duplicates.db"))
-        self.db_path_edit.setEnabled(HAS_ENTERPRISE_MODULES)
-        db_path_layout.addWidget(self.db_path_edit)
-        db_layout.addLayout(db_path_layout)
-        
-        db_layout.addStretch()
-        tabs.addTab(db_tab, "💾 Database")
         
         # GPU settings tab
         gpu_tab = QWidget()
@@ -2139,7 +2564,7 @@ class EnterpriseConfigDialog(QDialog):
         batch_layout.addWidget(QLabel("GPU batch size:"))
         self.gpu_batch_size = QSpinBox()
         self.gpu_batch_size.setRange(1, 1000)
-        self.gpu_batch_size.setValue(self.config.get("gpu_batch_size", 32))
+        self.gpu_batch_size.setValue(_resolve_gpu_batch_size(self.config.get("gpu_batch_size")))
         self.gpu_batch_size.setEnabled(HAS_CUDA)
         batch_layout.addWidget(self.gpu_batch_size)
         batch_layout.addStretch()
@@ -2147,49 +2572,6 @@ class EnterpriseConfigDialog(QDialog):
         
         gpu_layout.addStretch()
         tabs.addTab(gpu_tab, "🎮 GPU")
-        
-        # Plugin settings tab
-        plugin_tab = QWidget()
-        plugin_layout = QVBoxLayout(plugin_tab)
-        plugin_layout.setSpacing(10)
-        
-        self.use_plugins_cb = QCheckBox("Enable plugin system for extensibility")
-        self.use_plugins_cb.setChecked(self.config.get("use_plugins", True))
-        self.use_plugins_cb.setEnabled(HAS_ENTERPRISE_MODULES)
-        plugin_layout.addWidget(self.use_plugins_cb)
-        
-        plugin_dir_layout = QHBoxLayout()
-        plugin_dir_layout.addWidget(QLabel("Plugin directory:"))
-        self.plugin_dir_edit = QLineEdit(self.config.get("plugin_dir", "plugins"))
-        self.plugin_dir_edit.setEnabled(HAS_ENTERPRISE_MODULES)
-        plugin_dir_layout.addWidget(self.plugin_dir_edit)
-        plugin_layout.addLayout(plugin_dir_layout)
-        
-        plugin_layout.addStretch()
-        tabs.addTab(plugin_tab, "🔌 Plugins")
-        
-        # Memory optimization tab
-        memory_tab = QWidget()
-        memory_layout = QVBoxLayout(memory_tab)
-        memory_layout.setSpacing(10)
-        
-        self.optimize_memory_cb = QCheckBox("Enable memory optimization for large files")
-        self.optimize_memory_cb.setChecked(self.config.get("optimize_memory", True))
-        self.optimize_memory_cb.setEnabled(HAS_ENTERPRISE_MODULES)
-        memory_layout.addWidget(self.optimize_memory_cb)
-        
-        threshold_layout = QHBoxLayout()
-        threshold_layout.addWidget(QLabel("Large file threshold (MB):"))
-        self.large_file_threshold = QSpinBox()
-        self.large_file_threshold.setRange(1, 10000)
-        self.large_file_threshold.setValue(self.config.get("large_file_threshold", 100))
-        self.large_file_threshold.setEnabled(HAS_ENTERPRISE_MODULES)
-        threshold_layout.addWidget(self.large_file_threshold)
-        threshold_layout.addStretch()
-        memory_layout.addLayout(threshold_layout)
-        
-        memory_layout.addStretch()
-        tabs.addTab(memory_tab, "🧠 Memory")
         
         # Merge settings tab
         merge_tab = QWidget()
@@ -2200,16 +2582,6 @@ class EnterpriseConfigDialog(QDialog):
         self.enable_merging_cb.setChecked(self.config.get("enable_merging", True))
         self.enable_merging_cb.setEnabled(HAS_ENTERPRISE_MODULES)
         merge_layout.addWidget(self.enable_merging_cb)
-        
-        self.analyze_merges_cb = QCheckBox("Auto-analyze merge opportunities")
-        self.analyze_merges_cb.setChecked(self.config.get("analyze_merges", False))
-        self.analyze_merges_cb.setEnabled(HAS_ENTERPRISE_MODULES)
-        merge_layout.addWidget(self.analyze_merges_cb)
-        
-        self.backup_before_merge_cb = QCheckBox("Create backups before merging")
-        self.backup_before_merge_cb.setChecked(self.config.get("backup_before_merge", True))
-        self.backup_before_merge_cb.setEnabled(HAS_ENTERPRISE_MODULES)
-        merge_layout.addWidget(self.backup_before_merge_cb)
         
         merge_layout.addStretch()
         tabs.addTab(merge_tab, "🔀 Merging")
@@ -2236,7 +2608,7 @@ class EnterpriseConfigDialog(QDialog):
         tabs.addTab(undo_tab, "↩️ Undo")
         
         layout.addWidget(tabs)
-        
+
         # Buttons
         button_layout = QHBoxLayout()
         
@@ -2258,41 +2630,38 @@ class EnterpriseConfigDialog(QDialog):
     
     def reset_defaults(self):
         """Reset all settings to defaults"""
-        self.use_database_cb.setChecked(True)
-        self.incremental_scan_cb.setChecked(True)
-        self.db_path_edit.setText("duplicates.db")
         self.use_gpu_cb.setChecked(HAS_CUDA)
         self.use_gpu_hashing_cb.setChecked(HAS_CUDA)
-        self.gpu_batch_size.setValue(32)
-        self.use_plugins_cb.setChecked(True)
-        self.plugin_dir_edit.setText("plugins")
-        self.optimize_memory_cb.setChecked(True)
-        self.large_file_threshold.setValue(100)
+        self.gpu_batch_size.setValue(_default_gpu_batch_size())
         self.enable_merging_cb.setChecked(True)
-        self.analyze_merges_cb.setChecked(False)
-        self.backup_before_merge_cb.setChecked(True)
         self.enable_undo_cb.setChecked(True)
         self.max_undo_ops.setValue(100)
         
     def get_config(self) -> Dict[str, Any]:
         """Get the configuration from the dialog"""
         return {
-            "use_database": self.use_database_cb.isChecked(),
-            "incremental_scan": self.incremental_scan_cb.isChecked(),
-            "db_path": self.db_path_edit.text(),
             "use_gpu": self.use_gpu_cb.isChecked(),
             "use_gpu_hashing": self.use_gpu_hashing_cb.isChecked(),
             "gpu_batch_size": self.gpu_batch_size.value(),
-            "use_plugins": self.use_plugins_cb.isChecked(),
-            "plugin_dir": self.plugin_dir_edit.text(),
-            "optimize_memory": self.optimize_memory_cb.isChecked(),
-            "large_file_threshold": self.large_file_threshold.value(),
             "enable_merging": self.enable_merging_cb.isChecked(),
-            "analyze_merges": self.analyze_merges_cb.isChecked(),
-            "backup_before_merge": self.backup_before_merge_cb.isChecked(),
             "enable_undo": self.enable_undo_cb.isChecked(),
             "max_undo_operations": self.max_undo_ops.value()
         }
+
+
+def resolve_move_destination_path(destination: str, filename: str) -> str:
+    """Return a non-conflicting move destination using _1, _2, ... suffixes."""
+    dest_path = os.path.join(destination, filename)
+    if not os.path.exists(dest_path):
+        return dest_path
+
+    base_name, ext = os.path.splitext(filename)
+    counter = 1
+    while True:
+        candidate = os.path.join(destination, f"{base_name}_{counter}{ext}")
+        if not os.path.exists(candidate):
+            return candidate
+        counter += 1
 
 
 class BulkMoveThread(QThread):
@@ -2368,15 +2737,7 @@ class BulkMoveThread(QThread):
                     continue
 
                 filename = os.path.basename(file_path)
-                dest_path = os.path.join(self.destination, filename)
-
-                # Handle filename conflicts
-                counter = 1
-                base_name, ext = os.path.splitext(filename)
-                while os.path.exists(dest_path):
-                    new_filename = f"{base_name}_{counter}{ext}"
-                    dest_path = os.path.join(self.destination, new_filename)
-                    counter += 1
+                dest_path = resolve_move_destination_path(self.destination, filename)
 
                 shutil.move(file_path, dest_path)
                 moved_count += 1
@@ -2437,14 +2798,16 @@ class BulkDeleteThread(QThread):
             self.progress.emit(idx, total)
             self.status.emit(f"{verb} {os.path.basename(file_path)} ({idx}/{total})")
 
+            backup_operation = None
             try:
+                if not os.path.exists(file_path):
+                    continue   # already gone — don't count as error
+
                 # Backup before permanent delete so undo stays possible
                 if self.undo_enabled and self.undo_manager and not self.use_recycle:
                     if self.undo_manager.backup_file(file_path):
                         backed_up += 1
-
-                if not os.path.exists(file_path):
-                    continue   # already gone — don't count as error
+                        backup_operation = self.undo_manager.operations[-1]
 
                 # Build path variants (Windows long-path prefix handling)
                 normalized = (file_path.replace("\\\\?\\", "")
@@ -2479,6 +2842,9 @@ class BulkDeleteThread(QThread):
                     raise last_err
 
             except Exception as e:
+                if backup_operation and self.undo_manager:
+                    self.undo_manager.discard_operation(backup_operation)
+                    backed_up = max(0, backed_up - 1)
                 failed.append(f"{os.path.basename(file_path)}: {e}")
 
         self.result.emit({
@@ -2561,6 +2927,8 @@ class EnhancedDuplicateFinder(QMainWindow):
         super().__init__()
         self.duplicates = {}
         self.similar_files = {}
+        self._file_selection_state = {}
+        self._selection_sync_guard = False
         self.move_destination = None
         self.scan_filters = ScanFilters()
         self.scan_thread = None
@@ -2596,19 +2964,10 @@ class EnhancedDuplicateFinder(QMainWindow):
         
         # Advanced configuration
         self.enterprise_config = {
-            "use_database": True,
-            "incremental_scan": True,
-            "db_path": "duplicates.db",
             "use_gpu": HAS_CUDA,
             "use_gpu_hashing": HAS_CUDA,
-            "gpu_batch_size": 32,
-            "use_plugins": True,
-            "plugin_dir": "plugins",
-            "optimize_memory": True,
-            "large_file_threshold": 100,
+            "gpu_batch_size": _default_gpu_batch_size(),
             "enable_merging": True,
-            "analyze_merges": False,
-            "backup_before_merge": True,
             "enable_undo": True,
             "max_undo_operations": 100
         }
@@ -2621,9 +2980,16 @@ class EnhancedDuplicateFinder(QMainWindow):
         if saved_config:
             try:
                 import json
-                self.enterprise_config.update(json.loads(saved_config))
+                loaded_config = json.loads(saved_config)
+                if isinstance(loaded_config, dict):
+                    for key in self.enterprise_config:
+                        if key in loaded_config:
+                            self.enterprise_config[key] = loaded_config[key]
             except Exception:
                 pass
+        self.enterprise_config["gpu_batch_size"] = _resolve_gpu_batch_size(
+            self.enterprise_config.get("gpu_batch_size")
+        )
         
         # Initialize undo manager
         self.undo_manager = UndoManager()
@@ -2646,24 +3012,16 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.restore_window_state()
     
     def _init_enterprise_components(self):
-        """Initialize enterprise backend components if available"""
+        """Initialize only the maintained advanced components used by the app."""
+        self.db_manager = None
+        self.plugin_manager = None
+        self.memory_manager = None
+        self.file_merger = None
+
         if not HAS_ENTERPRISE_MODULES:
             return
-            
+
         try:
-            if self.enterprise_config.get("use_database", True):
-                self.db_manager = DatabaseManager(self.enterprise_config.get("db_path", "duplicates.db"))
-                logger.info("✅ Database manager initialized")
-                
-            if self.enterprise_config.get("use_plugins", True):
-                self.plugin_manager = PluginManager(self.enterprise_config.get("plugin_dir", "plugins"))
-                # PluginManager loads plugins in __init__, no separate call needed
-                logger.info("✅ Plugin manager initialized")
-                
-            if self.enterprise_config.get("optimize_memory", True):
-                self.memory_manager = MemoryManager()
-                logger.info("✅ Memory manager initialized")
-                
             if self.enterprise_config.get("enable_merging", True):
                 self.file_merger = FileMerger()
                 logger.info("✅ File merger initialized")
@@ -3635,12 +3993,23 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.move_perfect_audio_btn.clicked.connect(self.show_perfect_audio_move_preview)
         self.move_perfect_audio_btn.setEnabled(False)
         self.move_perfect_audio_btn.setToolTip(
-            "Move files from Similar groups with 100% hybrid audio similarity.\n"
+            "Move files from Similar groups classified as strict 100% audio matches.\n"
             "The best-quality version in each group is kept; all others are moved first."
         )
         self.move_perfect_audio_btn.setStyleSheet("background-color: #e65100; color: white; padding: 8px 16px;")
         self.move_perfect_audio_btn.setMinimumHeight(38)
         actions_row_top.addWidget(self.move_perfect_audio_btn)
+
+        self.move_same_song_audio_btn = QPushButton("Move Same Song Matches")
+        self.move_same_song_audio_btn.clicked.connect(self.show_same_song_audio_move_preview)
+        self.move_same_song_audio_btn.setEnabled(False)
+        self.move_same_song_audio_btn.setToolTip(
+            "Move files from Similar groups classified as same-song matches.\n"
+            "This is lower confidence than strict 100% audio matches."
+        )
+        self.move_same_song_audio_btn.setStyleSheet("background-color: #1565c0; color: white; padding: 8px 16px;")
+        self.move_same_song_audio_btn.setMinimumHeight(38)
+        actions_row_top.addWidget(self.move_same_song_audio_btn)
         actions_row_top.addStretch()
         
         self.select_all_btn = QPushButton("Select All")
@@ -3811,7 +4180,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         
         self.duplicate_files_tree = QTreeWidget()
         self.duplicate_files_tree.setHeaderLabels(["Select", "File Name", "Path", "Type", "Quality", "Details", "Size", "Modified"])
-        self.duplicate_files_tree.itemChanged.connect(self.update_selection_buttons)
+        self.duplicate_files_tree.itemChanged.connect(self._on_file_tree_item_changed)
         self.duplicate_files_tree.currentItemChanged.connect(self.show_file_preview)
         files_layout.addWidget(self.duplicate_files_tree)
         
@@ -3860,7 +4229,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         
         self.similar_files_tree = QTreeWidget()
         self.similar_files_tree.setHeaderLabels(["Select", "File Name", "Path", "Type", "Quality", "Details", "Size", "Modified"])
-        self.similar_files_tree.itemChanged.connect(self.update_selection_buttons)
+        self.similar_files_tree.itemChanged.connect(self._on_file_tree_item_changed)
         self.similar_files_tree.currentItemChanged.connect(self.show_file_preview)
         files_layout.addWidget(self.similar_files_tree)
         
@@ -3948,9 +4317,11 @@ class EnhancedDuplicateFinder(QMainWindow):
         # Batch size for GPU
         perf_layout.addWidget(QLabel("GPU Batch Size:"), 2, 0)
         self.gpu_batch_spin = QSpinBox()
-        self.gpu_batch_spin.setRange(8, 256)
-        self.gpu_batch_spin.setValue(64)
-        self.gpu_batch_spin.setToolTip("Number of images to process per GPU batch")
+        self.gpu_batch_spin.setRange(8, 1024)
+        self.gpu_batch_spin.setValue(_resolve_gpu_batch_size(self.enterprise_config.get("gpu_batch_size")))
+        self.gpu_batch_spin.setToolTip(
+            f"Number of images to process per GPU batch (detected default: {_default_gpu_batch_size()})"
+        )
         perf_layout.addWidget(self.gpu_batch_spin, 2, 1)
         
         # Memory optimization
@@ -4247,7 +4618,18 @@ class EnhancedDuplicateFinder(QMainWindow):
         
         # Get performance settings
         use_parallel = self.use_parallel_cb.isChecked()
-        use_gpu = self.use_gpu_cb.isChecked() and HAS_CUDA
+        use_gpu = (
+            self.use_gpu_cb.isChecked()
+            and self.enterprise_config.get("use_gpu", HAS_CUDA)
+            and HAS_CUDA
+        )
+        use_gpu_hashing = self.enterprise_config.get("use_gpu_hashing", HAS_CUDA)
+        configured_gpu_batch_size = (
+            self.gpu_batch_spin.value() if hasattr(self, "gpu_batch_spin")
+            else self.enterprise_config.get("gpu_batch_size")
+        )
+        gpu_batch_size = _resolve_gpu_batch_size(configured_gpu_batch_size, upgrade_legacy_default=False)
+        self.enterprise_config["gpu_batch_size"] = gpu_batch_size
         
         mode_str = []
         if use_gpu:
@@ -4261,6 +4643,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.scan_start_time = time.time()
         
         # Clear previous results
+        self._reset_selection_state()
         self.duplicates = {}
         self.similar_files = {}
         self.groups_tree.clear()
@@ -4279,7 +4662,9 @@ class EnhancedDuplicateFinder(QMainWindow):
             comparison_settings, 
             scan_filters,
             use_parallel=use_parallel,
-            use_gpu=use_gpu
+            use_gpu=use_gpu,
+            use_gpu_hashing=use_gpu_hashing,
+            gpu_batch_size=gpu_batch_size,
         )
         self._retain_thread_until_finished(self.scan_thread)
         self._clear_thread_attr_when_finished("scan_thread", self.scan_thread)
@@ -4629,7 +5014,15 @@ class EnhancedDuplicateFinder(QMainWindow):
                 orig_i, key, group_data = items_list[idx]
                 group_item = QTreeWidgetItem()
                 match_type = group_data.get("match_type", "")
-                if match_type == "content":
+                audio_match = group_data.get("audio_match") or {}
+                reasons = group_data.get("reasons", [])
+                if audio_match.get("tier") == "strict_recording_match":
+                    label = "100% Audio Match"
+                elif audio_match.get("tier") == "same_song_match":
+                    label = "Same Song Match"
+                elif any(reason.startswith("Exact image content") for reason in reasons):
+                    label = "Same Image Content"
+                elif match_type == "content":
                     label = "Content Group"
                 elif match_type == "same_name_diff_size":
                     label = "Same Name ≠ Size"
@@ -4638,7 +5031,7 @@ class EnhancedDuplicateFinder(QMainWindow):
                 else:
                     label = "Similar Group"
                 group_item.setText(0, f"{label} {orig_i+1}")
-                group_item.setText(1, ", ".join(group_data.get('reasons', [])))
+                group_item.setText(1, ", ".join(reasons))
                 group_item.setText(2, str(len(group_data.get('files', []))))
                 group_item.setData(0, Qt.ItemDataRole.UserRole, key)
                 # NR-2: quick=True; quality details computed lazily on selection
@@ -4671,6 +5064,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         # Build file info list using only os.stat() — no quality I/O here (UI-5)
         file_infos = []
         for file_path in files:
+            default_checked = file_path != suggested_keep
             try:
                 stat = os.stat(file_path)
                 file_infos.append({
@@ -4679,6 +5073,7 @@ class EnhancedDuplicateFinder(QMainWindow):
                     'size': stat.st_size,
                     'mtime': stat.st_mtime,
                     'is_suggested': file_path == suggested_keep,
+                    'checked': self._remember_file_selection(file_path, default_checked),
                 })
             except Exception:
                 file_infos.append({
@@ -4687,6 +5082,7 @@ class EnhancedDuplicateFinder(QMainWindow):
                     'size': 0,
                     'mtime': 0,
                     'is_suggested': file_path == suggested_keep,
+                    'checked': self._remember_file_selection(file_path, default_checked),
                 })
 
         # Sort: suggested keep first, then by modification time (oldest first)
@@ -4695,17 +5091,17 @@ class EnhancedDuplicateFinder(QMainWindow):
         for info in file_infos:
             item = QTreeWidgetItem()
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setData(0, Qt.ItemDataRole.UserRole, info['path'])
 
             if info['is_suggested']:
-                item.setCheckState(0, Qt.CheckState.Unchecked)
                 item.setText(1, f"⭐ {info['name']}")
                 font = item.font(1)
                 font.setBold(True)
                 item.setFont(1, font)
             else:
-                item.setCheckState(0, Qt.CheckState.Checked)
                 item.setText(1, info['name'])
 
+            self._set_tree_item_checked(item, info['checked'])
             item.setText(2, info['path'])
             item.setText(3, "…")   # type     — filled by GroupQualityThread
             item.setText(4, "…")   # quality  — filled by GroupQualityThread
@@ -4718,7 +5114,6 @@ class EnhancedDuplicateFinder(QMainWindow):
             else:
                 item.setText(7, "Unknown")
 
-            item.setData(0, Qt.ItemDataRole.UserRole, info['path'])
             self.duplicate_files_tree.addTopLevelItem(item)
 
         # Auto-resize columns with placeholder data first
@@ -4741,6 +5136,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         self._clear_thread_attr_when_finished("_quality_thread", self._quality_thread)
         self._quality_thread.quality_ready.connect(_apply_dup_quality)
         self._quality_thread.start()
+        self.update_selection_buttons()
     
     def show_similar_group_files(self, current, previous):
         """Show files in selected similar group with sorting"""
@@ -4761,6 +5157,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         # Build file info list using only os.stat() — no quality I/O here (UI-5)
         file_infos = []
         for file_path in files:
+            default_checked = file_path != suggested_keep
             try:
                 stat = os.stat(file_path)
                 file_infos.append({
@@ -4769,6 +5166,7 @@ class EnhancedDuplicateFinder(QMainWindow):
                     'size': stat.st_size,
                     'mtime': stat.st_mtime,
                     'is_suggested': file_path == suggested_keep,
+                    'checked': self._remember_file_selection(file_path, default_checked),
                 })
             except Exception:
                 file_infos.append({
@@ -4777,6 +5175,7 @@ class EnhancedDuplicateFinder(QMainWindow):
                     'size': 0,
                     'mtime': 0,
                     'is_suggested': file_path == suggested_keep,
+                    'checked': self._remember_file_selection(file_path, default_checked),
                 })
 
         # Sort: suggested keep first, then by size
@@ -4785,17 +5184,17 @@ class EnhancedDuplicateFinder(QMainWindow):
         for info in file_infos:
             item = QTreeWidgetItem()
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setData(0, Qt.ItemDataRole.UserRole, info['path'])
 
             if info['is_suggested']:
-                item.setCheckState(0, Qt.CheckState.Unchecked)
                 item.setText(1, f"⭐ {info['name']}")
                 font = item.font(1)
                 font.setBold(True)
                 item.setFont(1, font)
             else:
-                item.setCheckState(0, Qt.CheckState.Checked)
                 item.setText(1, info['name'])
 
+            self._set_tree_item_checked(item, info['checked'])
             item.setText(2, info['path'])
             item.setText(3, "…")   # type     — filled by GroupQualityThread
             item.setText(4, "…")   # quality  — filled by GroupQualityThread
@@ -4808,7 +5207,6 @@ class EnhancedDuplicateFinder(QMainWindow):
             else:
                 item.setText(7, "Unknown")
 
-            item.setData(0, Qt.ItemDataRole.UserRole, info['path'])
             self.similar_files_tree.addTopLevelItem(item)
 
         # Auto-resize columns with placeholder data first
@@ -4831,6 +5229,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         self._clear_thread_attr_when_finished("_quality_thread", self._quality_thread)
         self._quality_thread.quality_ready.connect(_apply_sim_quality)
         self._quality_thread.start()
+        self.update_selection_buttons()
     
     def show_file_preview(self, current, previous):
         """Show file preview in preview area"""
@@ -4905,6 +5304,35 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.move_selected_btn.setEnabled(has_selection and self.move_destination is not None)
         self._update_bulk_operation_buttons()
 
+    def _reset_selection_state(self):
+        """Forget all remembered checkbox state."""
+        self._file_selection_state = {}
+
+    def _remember_file_selection(self, file_path, default_checked):
+        """Seed persisted checkbox state the first time a file is shown."""
+        if file_path not in self._file_selection_state:
+            self._file_selection_state[file_path] = bool(default_checked)
+        return self._file_selection_state[file_path]
+
+    def _set_tree_item_checked(self, item, checked):
+        """Set a checkbox state without treating it as a user interaction."""
+        self._selection_sync_guard = True
+        try:
+            item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        finally:
+            self._selection_sync_guard = False
+
+    def _on_file_tree_item_changed(self, item, column):
+        """Persist selection across group navigation and sorting."""
+        if self._selection_sync_guard or item is None or column != 0:
+            return
+
+        file_path = item.data(0, Qt.ItemDataRole.UserRole)
+        if file_path:
+            self._file_selection_state[file_path] = item.checkState(0) == Qt.CheckState.Checked
+
+        self.update_selection_buttons()
+
     def _update_bulk_operation_buttons(self):
         """Update bulk operation button states based on current context."""
         has_duplicates = bool(getattr(self, 'duplicates', {}))
@@ -4912,6 +5340,8 @@ class EnhancedDuplicateFinder(QMainWindow):
         self.bulk_move_btn.setEnabled(has_duplicates and has_destination)
         self.audio_smart_move_btn.setEnabled(has_duplicates and has_destination and self._has_audio_duplicates())
         self.move_perfect_audio_btn.setEnabled(has_destination and self._has_perfect_audio_similar())
+        if hasattr(self, "move_same_song_audio_btn"):
+            self.move_same_song_audio_btn.setEnabled(has_destination and self._has_same_song_audio_similar())
 
     def _is_audio_file(self, file_path):
         ext = os.path.splitext(file_path)[1].lower()
@@ -4928,9 +5358,39 @@ class EnhancedDuplicateFinder(QMainWindow):
     def _has_perfect_audio_similar(self):
         """Return True if any similar group has 100% audio similarity via hybrid."""
         for group_data in getattr(self, 'similar_files', {}).values():
-            if any('Similar audio (100%' in r for r in group_data.get('reasons', [])):
+            audio_match = group_data.get("audio_match") or {}
+            if audio_match.get("tier") == "strict_recording_match":
                 return True
         return False
+
+    def _has_same_song_audio_similar(self):
+        """Return True if any similar group is a same-song audio match."""
+        for group_data in getattr(self, 'similar_files', {}).values():
+            audio_match = group_data.get("audio_match") or {}
+            if audio_match.get("tier") == "same_song_match":
+                return True
+        return False
+
+    def _collect_audio_similarity_groups(self, tier):
+        """Collect structured audio-similarity groups for move workflows."""
+        groups = []
+        for key, group_data in getattr(self, 'similar_files', {}).items():
+            audio_match = group_data.get("audio_match") or {}
+            if audio_match.get("tier") != tier:
+                continue
+            files = group_data.get("files", [])
+            if len(files) < 2:
+                continue
+            keep = self._suggest_file_to_keep(files)
+            groups.append({
+                "key": key,
+                "files": files,
+                "keep": keep,
+                "move_files": [f for f in files if f != keep],
+                "reason": audio_match.get("reason", ", ".join(group_data.get("reasons", []))),
+                "audio_match": audio_match,
+            })
+        return groups
 
     def _get_quality_score(self, file_path):
         """Compute a quality score for keep-best decisions."""
@@ -4962,14 +5422,19 @@ class EnhancedDuplicateFinder(QMainWindow):
                     score = (width * height) / 1_000_000.0
                     details = f"{width}x{height}"
             elif category == "videos" and HAS_CV2:
+                # MAIN-FIX: Use try-finally to ensure cv2.VideoCapture is always released
                 cap = cv2.VideoCapture(file_path)
-                if cap.isOpened():
-                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    score = (width * height) / 1_000_000.0
-                    details = f"{width}x{height}"
-                cap.release()
-        except Exception:
+                try:
+                    if cap.isOpened():
+                        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        score = (width * height) / 1_000_000.0
+                        details = f"{width}x{height}"
+                finally:
+                    cap.release()
+        except Exception as e:
+            # MAIN-FIX: Log the exception for debugging instead of silent failure
+            logger.debug(f"Quality analysis failed for {file_path}: {e}")
             score = 0.0
             details = "N/A"
 
@@ -4983,40 +5448,16 @@ class EnhancedDuplicateFinder(QMainWindow):
 
     def has_selected_files(self):
         """Check if any files are selected in either tree"""
-        # Check duplicate files tree
-        for i in range(self.duplicate_files_tree.topLevelItemCount()):
-            item = self.duplicate_files_tree.topLevelItem(i)
-            if item.checkState(0) == Qt.CheckState.Checked:
-                return True
-        
-        # Check similar files tree
-        for i in range(self.similar_files_tree.topLevelItemCount()):
-            item = self.similar_files_tree.topLevelItem(i)
-            if item.checkState(0) == Qt.CheckState.Checked:
-                return True
-        
-        return False
+        return any(self._file_selection_state.values())
     
     def get_selected_files(self):
         """Get list of selected file paths"""
         selected_files = []
-        
-        # Get from duplicate files tree
-        for i in range(self.duplicate_files_tree.topLevelItemCount()):
-            item = self.duplicate_files_tree.topLevelItem(i)
-            if item.checkState(0) == Qt.CheckState.Checked:
-                file_path = item.data(0, Qt.ItemDataRole.UserRole)
-                if file_path:
-                    selected_files.append(file_path)
-        
-        # Get from similar files tree
-        for i in range(self.similar_files_tree.topLevelItemCount()):
-            item = self.similar_files_tree.topLevelItem(i)
-            if item.checkState(0) == Qt.CheckState.Checked:
-                file_path = item.data(0, Qt.ItemDataRole.UserRole)
-                if file_path:
-                    selected_files.append(file_path)
-        
+        seen = set()
+        for file_path, is_checked in self._file_selection_state.items():
+            if is_checked and file_path not in seen:
+                selected_files.append(file_path)
+                seen.add(file_path)
         return selected_files
     
     def select_all_in_group(self):
@@ -5030,16 +5471,25 @@ class EnhancedDuplicateFinder(QMainWindow):
         
         for i in range(tree.topLevelItemCount()):
             item = tree.topLevelItem(i)
-            item.setCheckState(0, Qt.CheckState.Checked)
+            file_path = item.data(0, Qt.ItemDataRole.UserRole)
+            if file_path:
+                self._file_selection_state[file_path] = True
+            self._set_tree_item_checked(item, True)
         
         self.update_selection_buttons()
     
     def clear_selection(self):
         """Clear all selections"""
+        for file_path in list(self._file_selection_state.keys()):
+            self._file_selection_state[file_path] = False
+
         for tree in [self.duplicate_files_tree, self.similar_files_tree]:
             for i in range(tree.topLevelItemCount()):
                 item = tree.topLevelItem(i)
-                item.setCheckState(0, Qt.CheckState.Unchecked)
+                file_path = item.data(0, Qt.ItemDataRole.UserRole)
+                if file_path:
+                    self._file_selection_state[file_path] = False
+                self._set_tree_item_checked(item, False)
         
         self.update_selection_buttons()
     
@@ -5092,8 +5542,9 @@ class EnhancedDuplicateFinder(QMainWindow):
                     files_to_delete.append(f)
                     try:
                         total_space_freed += os.path.getsize(f)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        # MAIN-FIX: Log file access errors
+                        logger.debug(f"Cannot get size of {f}: {e}")
         
         if not files_to_delete:
             QMessageBox.information(self, "Nothing to Delete", "No duplicate files to delete.")
@@ -5717,7 +6168,49 @@ class EnhancedDuplicateFinder(QMainWindow):
     # ------------------------------------------------------------------
 
     def show_perfect_audio_move_preview(self):
-        """Preview and move files from Similar groups that matched at 100% via hybrid audio fingerprint."""
+        """Preview and move files from strict 100% audio similarity groups."""
+        self._show_audio_similarity_move_preview(
+            tier="strict_recording_match",
+            empty_title="No 100% Audio Matches",
+            empty_message=(
+                "No Similar groups classified as strict 100% audio matches were found.\n"
+                "Run a scan with the Audio hash type to detect them."
+            ),
+            dialog_title="Move 100% Audio Matches — Preview",
+            summary_title="Groups with 100% audio match:",
+            group_label="100% Audio Match",
+            operation_name="Move 100% Audio Matches",
+            button_style="background-color: #e65100; color: white; padding: 8px 16px;",
+        )
+
+    def show_same_song_audio_move_preview(self):
+        """Preview and move files from same-song audio similarity groups."""
+        self._show_audio_similarity_move_preview(
+            tier="same_song_match",
+            empty_title="No Same Song Matches",
+            empty_message=(
+                "No Similar groups classified as same-song audio matches were found.\n"
+                "Run a scan with the Audio hash type to detect them."
+            ),
+            dialog_title="Move Same Song Matches — Preview",
+            summary_title="Groups with same-song match:",
+            group_label="Same Song Match",
+            operation_name="Move Same Song Matches",
+            button_style="background-color: #1565c0; color: white; padding: 8px 16px;",
+        )
+
+    def _show_audio_similarity_move_preview(
+        self,
+        tier,
+        empty_title,
+        empty_message,
+        dialog_title,
+        summary_title,
+        group_label,
+        operation_name,
+        button_style,
+    ):
+        """Preview and move files from structured audio similarity groups."""
         if not self.move_destination:
             QMessageBox.warning(self, "No Destination", "Please select a move destination first.")
             return
@@ -5725,46 +6218,25 @@ class EnhancedDuplicateFinder(QMainWindow):
             QMessageBox.information(self, "No Similar Files", "Run a scan first.")
             return
 
-        # Collect every similar group whose reason list contains "Similar audio (100%"
-        perfect_groups = []
-        for key, group_data in self.similar_files.items():
-            reasons = group_data.get('reasons', [])
-            if any('Similar audio (100%' in r for r in reasons):
-                files = group_data.get('files', [])
-                if len(files) < 2:
-                    continue
-                keep = self._suggest_file_to_keep(files)
-                move_files = [f for f in files if f != keep]
-                perfect_groups.append({
-                    'key': key,
-                    'files': files,
-                    'keep': keep,
-                    'move_files': move_files,
-                    'reason': next((r for r in reasons if 'Similar audio' in r), reasons[0] if reasons else ''),
-                })
-
-        if not perfect_groups:
-            QMessageBox.information(
-                self, "No 100% Audio Matches",
-                "No Similar groups with 100% hybrid audio similarity were found.\n"
-                "Run a scan with the Audio hash type to detect them."
-            )
+        matched_groups = self._collect_audio_similarity_groups(tier)
+        if not matched_groups:
+            QMessageBox.information(self, empty_title, empty_message)
             return
 
-        total_to_move = sum(len(g['move_files']) for g in perfect_groups)
+        total_to_move = sum(len(g['move_files']) for g in matched_groups)
 
         # ---- Preview dialog ----
         dialog = QDialog(self)
-        dialog.setWindowTitle("Move 100% Audio Matches — Preview")
+        dialog.setWindowTitle(dialog_title)
         dialog.resize(860, 560)
         layout = QVBoxLayout(dialog)
 
         summary_group = QGroupBox("Summary")
         summary_layout = QVBoxLayout(summary_group)
-        summary_layout.addWidget(QLabel(f"<b>Groups with 100% audio match:</b> {len(perfect_groups)}"))
+        summary_layout.addWidget(QLabel(f"<b>{summary_title}</b> {len(matched_groups)}"))
         summary_layout.addWidget(QLabel(f"<b>Files to MOVE:</b> {total_to_move}"))
         summary_layout.addWidget(QLabel(
-            f"<b>Files to KEEP</b> (best quality per group): {len(perfect_groups)}"
+            f"<b>Files to KEEP</b> (best quality per group): {len(matched_groups)}"
         ))
         summary_layout.addWidget(QLabel(f"<b>Destination:</b> {self.move_destination}"))
         layout.addWidget(summary_group)
@@ -5773,9 +6245,9 @@ class EnhancedDuplicateFinder(QMainWindow):
         preview_tree.setHeaderLabels(["File", "Format / Size", "Match Reason", "Action"])
         preview_tree.setAlternatingRowColors(True)
 
-        for g in perfect_groups:
+        for g in matched_groups:
             group_item = QTreeWidgetItem()
-            group_item.setText(0, f"100% Audio Match ({len(g['files'])} files)")
+            group_item.setText(0, f"{group_label} ({len(g['files'])} files)")
             group_item.setText(2, g['reason'])
             preview_tree.addTopLevelItem(group_item)
 
@@ -5811,21 +6283,21 @@ class EnhancedDuplicateFinder(QMainWindow):
         btn_row.addStretch()
 
         proceed_btn = QPushButton(f"Move {total_to_move} File{'s' if total_to_move != 1 else ''}")
-        proceed_btn.setStyleSheet("background-color: #e65100; color: white; padding: 8px 16px;")
+        proceed_btn.setStyleSheet(button_style)
         proceed_btn.clicked.connect(
-            lambda: self._start_perfect_audio_move(perfect_groups, dialog)
+            lambda: self._start_audio_similarity_move(matched_groups, dialog, operation_name)
         )
         btn_row.addWidget(proceed_btn)
         layout.addLayout(btn_row)
 
         dialog.exec()
 
-    def _start_perfect_audio_move(self, perfect_groups, preview_dialog):
-        """Execute the move for 100% audio match groups."""
+    def _start_audio_similarity_move(self, matched_groups, preview_dialog, operation_name):
+        """Execute the move for structured audio match groups."""
         preview_dialog.accept()
 
         files_to_move = []
-        for g in perfect_groups:
+        for g in matched_groups:
             files_to_move.extend(g['move_files'])
 
         if not files_to_move:
@@ -5834,7 +6306,7 @@ class EnhancedDuplicateFinder(QMainWindow):
         os.makedirs(self.move_destination, exist_ok=True)
 
         progress_dialog = QDialog(self)
-        progress_dialog.setWindowTitle("Moving 100% Audio Matches")
+        progress_dialog.setWindowTitle(operation_name)
         progress_dialog.resize(480, 160)
         prog_layout = QVBoxLayout(progress_dialog)
 
@@ -5870,7 +6342,7 @@ class EnhancedDuplicateFinder(QMainWindow):
 
         def on_finished(result):
             progress_dialog.accept()
-            self._handle_bulk_move_results(result, operation_name="Move 100% Audio Matches")
+            self._handle_bulk_move_results(result, operation_name=operation_name)
 
         thread.progress.connect(on_progress)
         thread.status.connect(on_status)
@@ -6176,6 +6648,7 @@ class EnhancedDuplicateFinder(QMainWindow):
             for i, (key, gd) in enumerate(similar_snap.items()):
                 export_data["similar_files"][f"group_{i+1}"] = {
                     "reasons": gd.get("reasons", []),
+                    "audio_match": gd.get("audio_match"),
                     "files": [
                         {"path": f, "name": os.path.basename(f),
                          "size": os.path.getsize(f) if os.path.exists(f) else 0}
@@ -6376,7 +6849,13 @@ class EnhancedDuplicateFinder(QMainWindow):
         """Show enterprise configuration dialog"""
         dialog = EnterpriseConfigDialog(self, self.enterprise_config)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.enterprise_config.update(dialog.get_config())
+            self.enterprise_config = dialog.get_config()
+            self.enterprise_config["gpu_batch_size"] = _resolve_gpu_batch_size(
+                self.enterprise_config.get("gpu_batch_size"),
+                upgrade_legacy_default=False,
+            )
+            if hasattr(self, "gpu_batch_spin"):
+                self.gpu_batch_spin.setValue(self.enterprise_config["gpu_batch_size"])
             
             # Save to settings
             import json
@@ -6461,6 +6940,7 @@ Confidence: {analysis.get('confidence', 0):.1%}
                 
                 # Restore similar files
                 self.similar_files = session_data.get('similar_files', {})
+                self._reset_selection_state()
                 
                 # Restore directory if available
                 if 'directory' in session_data:
@@ -6633,6 +7113,11 @@ Confidence: {analysis.get('confidence', 0):.1%}
         """
         if removed_files is not None:
             removed = set(removed_files)
+            self._file_selection_state = {
+                path: checked
+                for path, checked in self._file_selection_state.items()
+                if path not in removed
+            }
             pruned_duplicates = {}
             for hash_val, files in self.duplicates.items():
                 remaining = [f for f in files if f not in removed]
@@ -6650,6 +7135,11 @@ Confidence: {analysis.get('confidence', 0):.1%}
             self.similar_files = pruned_similar
         else:
             # Slow path — only used when we don't know which files were removed
+            self._file_selection_state = {
+                path: checked
+                for path, checked in self._file_selection_state.items()
+                if os.path.exists(path)
+            }
             pruned_duplicates = {}
             for hash_val, files in self.duplicates.items():
                 existing = [f for f in files if os.path.exists(f)]
@@ -6675,6 +7165,11 @@ Confidence: {analysis.get('confidence', 0):.1%}
             self.settings.setValue("last_directory", self.directory)
         
         # Save enterprise config
+        if hasattr(self, "gpu_batch_spin"):
+            self.enterprise_config["gpu_batch_size"] = _resolve_gpu_batch_size(
+                self.gpu_batch_spin.value(),
+                upgrade_legacy_default=False,
+            )
         import json
         self.settings.setValue("advanced_config", json.dumps(self.enterprise_config))
         self.settings.setValue("enterprise_config", json.dumps(self.enterprise_config))

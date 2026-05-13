@@ -128,6 +128,7 @@ class PluginManager:
         self.plugin_errors: List[Dict] = []
         
         self._create_plugin_structure()
+        self.plugin_configs = self._load_plugin_config()
         self.load_all_plugins()
         
     def _create_plugin_structure(self):
@@ -150,8 +151,74 @@ class PluginManager:
                 "auto_load": True,
                 "security_check": True
             }
-            with open(config_file, 'w') as f:
+            with open(config_file, 'w', encoding='utf-8') as f:
                 json.dump(default_config, f, indent=2)
+
+    def _load_plugin_config(self) -> Dict[str, Any]:
+        """Load plugin config with validation and sane defaults."""
+        config_file = self.plugin_directory / "plugin_config.json"
+        config: Dict[str, Any] = {
+            "enabled_plugins": [],
+            "plugin_settings": {},
+            "auto_load": True,
+            "security_check": True,
+        }
+
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                config.update(loaded)
+        except Exception as e:
+            logger.warning(f"Plugin config load failed for {config_file}: {e}")
+
+        enabled_plugins = config.get("enabled_plugins", [])
+        if not isinstance(enabled_plugins, list):
+            enabled_plugins = []
+        config["enabled_plugins"] = [str(name).strip() for name in enabled_plugins if str(name).strip()]
+
+        plugin_settings = config.get("plugin_settings", {})
+        config["plugin_settings"] = plugin_settings if isinstance(plugin_settings, dict) else {}
+        config["auto_load"] = bool(config.get("auto_load", True))
+        config["security_check"] = bool(config.get("security_check", True))
+        return config
+
+    def _should_load_plugin_file(self, plugin_file: Path) -> bool:
+        """Check config and basic safety constraints before importing a plugin."""
+        enabled_plugins = set(self.plugin_configs.get("enabled_plugins") or [])
+        auto_load = bool(self.plugin_configs.get("auto_load", True))
+
+        if enabled_plugins and plugin_file.stem not in enabled_plugins and plugin_file.name not in enabled_plugins:
+            return False
+        if not enabled_plugins and not auto_load:
+            return False
+
+        if self.plugin_configs.get("security_check", True):
+            try:
+                resolved_root = self.plugin_directory.resolve()
+                resolved_file = plugin_file.resolve()
+                resolved_file.relative_to(resolved_root)
+            except ValueError:
+                # PS-FIX: Catch specific ValueError from relative_to()
+                logger.warning(f"Skipping plugin outside plugin directory: {plugin_file}")
+                return False
+            except (OSError, PermissionError) as e:
+                # PS-FIX: Handle path resolution errors separately
+                logger.error(f"Cannot resolve plugin path {plugin_file}: {e}")
+                return False
+
+            if plugin_file.is_symlink():
+                logger.warning(f"Skipping symlinked plugin while security_check is enabled: {plugin_file}")
+                return False
+                return False
+
+        return True
+
+    def _plugin_loading_enabled(self) -> bool:
+        """Return True when config allows plugin discovery/import."""
+        enabled_plugins = set(self.plugin_configs.get("enabled_plugins") or [])
+        auto_load = bool(self.plugin_configs.get("auto_load", True))
+        return bool(enabled_plugins) or auto_load
                 
     def _create_example_plugins(self):
         """Create example plugins for reference"""
@@ -392,7 +459,14 @@ def create_plugin():
                 
     def load_all_plugins(self):
         """Load all plugins from plugin directory"""
+        self.hashing_plugins.clear()
+        self.file_type_plugins.clear()
+        self.similarity_plugins.clear()
         self.plugin_errors.clear()
+
+        if not self._plugin_loading_enabled():
+            logger.info("Plugin auto-load disabled and no plugins explicitly enabled")
+            return
         
         # Load from each subdirectory
         for plugin_type, plugin_dict, base_class in [
@@ -415,6 +489,8 @@ def create_plugin():
         """Load plugins from a specific directory"""
         for plugin_file in directory.glob("*.py"):
             if plugin_file.name.startswith("_"):
+                continue
+            if not self._should_load_plugin_file(plugin_file):
                 continue
                 
             try:
@@ -441,7 +517,18 @@ def create_plugin():
         module = importlib.util.module_from_spec(spec)
         # SECURITY WARNING (PS-1): exec_module executes arbitrary Python code from the plugin file.
         # Only load plugins from trusted sources. Do not place untrusted .py files in the plugins directory.
-        spec.loader.exec_module(module)
+        # PS-FIX: Add try-except around exec_module for better error handling
+        try:
+            spec.loader.exec_module(module)
+        except SyntaxError as e:
+            logger.error(f"Syntax error in plugin {plugin_file.name}: {e}")
+            return None
+        except ImportError as e:
+            logger.error(f"Import error in plugin {plugin_file.name}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error loading plugin {plugin_file.name}: {type(e).__name__}: {e}")
+            return None
         
         # Look for create_plugin function
         if hasattr(module, 'create_plugin'):
@@ -569,6 +656,7 @@ def create_plugin():
         
     def reload_plugins(self):
         """Reload all plugins"""
+        self.plugin_configs = self._load_plugin_config()
         self.hashing_plugins.clear()
         self.file_type_plugins.clear()
         self.similarity_plugins.clear()
@@ -581,11 +669,19 @@ def create_plugin():
     def install_plugin(self, plugin_file_path: str, plugin_type: str) -> bool:
         """Install a new plugin"""
         try:
-            source_path = Path(plugin_file_path)
-            if not source_path.exists():
+            source_path = Path(plugin_file_path).resolve()
+            if not source_path.exists() or not source_path.is_file():
                 return False
-                
+            if source_path.suffix.lower() != ".py":
+                return False
+
+            allowed_types = {"hashing", "file_types", "similarity"}
+            if plugin_type not in allowed_types:
+                logger.error(f"Plugin installation rejected for unsupported type: {plugin_type}")
+                return False
+
             target_dir = self.plugin_directory / plugin_type
+            target_dir.mkdir(exist_ok=True)
             target_path = target_dir / source_path.name
             
             # Copy plugin file

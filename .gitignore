@@ -22,3 +22,5 @@ coverage.xml
 .pytest_cache
 .hypothesis
 .vscode/
+ .duplicate_finder_backup/ 
+.github/ 

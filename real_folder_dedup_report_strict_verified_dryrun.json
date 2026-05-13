@@ -1,0 +1,17 @@
+{
+  "source_dir": "D:\\NOW SORT\\Duplicates Backup",
+  "target_dir": "D:\\NOW SORT\\Extera",
+  "run_root": "D:\\NOW SORT\\Extera\\dedup_run_20260320_042943",
+  "dry_run": true,
+  "scan_audio_file_count": 264,
+  "exact_group_count": 0,
+  "strict_pair_count": 0,
+  "near_candidate_count": 0,
+  "planned_move_count": 0,
+  "actual_moved_count": 0,
+  "elapsed_seconds": 642.7966301441193,
+  "exact_groups": {},
+  "strict_pairs": [],
+  "moved_files": [],
+  "near_review_candidates": []
+}

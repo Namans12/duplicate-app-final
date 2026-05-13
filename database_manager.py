@@ -27,9 +27,23 @@ class DatabaseManager:
         self._lock = threading.Lock()
         self.init_database()
 
+    @staticmethod
+    def _normalize_path(path: Optional[str]) -> Optional[str]:
+        """Normalize filesystem paths for stable cache keys and lookups."""
+        if not path:
+            return path
+        return os.path.abspath(os.path.normpath(path))
+
     def _connect(self):
-        """Create a SQLite connection with a busy timeout."""
-        return sqlite3.connect(self.db_path, timeout=30)
+        """Create a SQLite connection with pragmatic safety defaults."""
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 30000")
+        if self.db_path != ":memory:":
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+        return conn
 
     def init_database(self):
         """Initialize database tables."""
@@ -111,6 +125,7 @@ class DatabaseManager:
     def start_scan_session(self, directory: str, algorithm: str, filters: Dict) -> str:
         """Start a new scan session."""
         session_id = f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex}"
+        directory = self._normalize_path(directory) or directory
 
         with self._lock, self._connect() as conn:
             cursor = conn.cursor()
@@ -142,6 +157,7 @@ class DatabaseManager:
 
     def get_cached_file_info(self, file_path: str) -> Optional[Dict]:
         """Get cached file information if it exists and is up to date."""
+        file_path = self._normalize_path(file_path)
         if not os.path.exists(file_path):
             return None
 
@@ -160,8 +176,7 @@ class DatabaseManager:
 
             row = cursor.fetchone()
             if row:
-                columns = [desc[0] for desc in cursor.description]
-                return dict(zip(columns, row))
+                return dict(row)
 
         return None
 
@@ -173,6 +188,7 @@ class DatabaseManager:
         metadata: Optional[Dict] = None,
     ):
         """Cache file information."""
+        file_path = self._normalize_path(file_path)
         if not os.path.exists(file_path):
             return
 
@@ -244,6 +260,7 @@ class DatabaseManager:
 
     def get_scan_history(self, directory: Optional[str] = None, limit: int = 10) -> List[Dict]:
         """Get scan history for a directory or all scans."""
+        directory = self._normalize_path(directory) if directory else directory
         with self._lock, self._connect() as conn:
             cursor = conn.cursor()
 
@@ -265,21 +282,21 @@ class DatabaseManager:
                     (limit,),
                 )
 
-            columns = [desc[0] for desc in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return [dict(row) for row in cursor.fetchall()]
 
     def get_incremental_files(self, directory: str) -> Tuple[List[str], List[str]]:
         """Get files that need scanning (new or modified).
 
         DB-2 fix: uses a single batch SQL query instead of one query per file.
         """
+        directory = self._normalize_path(directory) or directory
         new_files = []
         modified_files = []
         all_files = []
 
         for root, dirs, files in os.walk(directory):
             for file_name in files:
-                all_files.append(os.path.join(root, file_name))
+                all_files.append(self._normalize_path(os.path.join(root, file_name)))
 
         if not all_files:
             return new_files, modified_files
@@ -291,11 +308,12 @@ class DatabaseManager:
                 if os.path.exists(file_path):
                     stat = os.stat(file_path)
                     current_info[file_path] = (stat.st_size, stat.st_mtime)
-            except OSError:
-                pass
+            except OSError as e:
+                # DB-FIX: Log skipped files instead of silently ignoring
+                logger.debug(f"Cannot stat file {file_path}: {e}")
 
         # Fetch all cached entries in a single query and compare in Python (DB-2 fix)
-        directory_prefix = os.path.join(os.path.abspath(directory), "")
+        directory_prefix = os.path.join(directory, "")
 
         with self._lock, self._connect() as conn:
             cursor = conn.cursor()
