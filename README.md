@@ -1,146 +1,126 @@
-# 🎯 Advanced Duplicate File Finder
+# Advanced Duplicate File Finder — Final (Dupe of [duplicate-app](https://github.com/Namans12/duplicate-app))
 
-A cutting-edge GUI application for finding and managing duplicate files with **AI-powered similarity detection** and modern professional interface. Built with Python + PyQt6 for robust desktop performance.
+Working copy of **[`duplicate-app`](https://github.com/Namans12/duplicate-app)**, taken 2026-03-07. Adds an isolated-environment installer, per-media-type tuning profiles, and — on the `final` branch — seven commits of dedup-engine work validated against real folders.
 
-## ✨ Key Features
+> ### ⚠️ Three branches, and they disagree
+>
+> `master` (2026-03-07) is close to the original. Three branches sit on top and **do not form a chain**:
+>
+> | Branch | Ahead | Date | Size |
+> |---|---|---|---|
+> | `final` | +7 | 2026-05-13 | 52 files, +45452/−10390 |
+> | `final2` | +1 | 2026-05-13 | 14 files, +819/−363 |
+> | `updated` | +1 | 2026-03-07 | 16 files, +428/−9020 |
+>
+> `final` is by far the most developed. `final2` is a separate single-commit pass from the same day. Diff them before merging either.
 
-### 🧠 AI-Powered Detection
-- **Audio Fingerprinting**: Advanced chromaprint + librosa analysis for music duplicates
-- **Video Scene Detection**: Multi-keyframe analysis for video content similarity  
-- **Text Similarity Scoring**: Semantic AI analysis with adjustable thresholds (0.50-0.95)
-- **Perceptual Image Hashing**: Visual similarity detection beyond exact matches
-- **Traditional Hashing**: MD5/SHA256 for exact duplicate detection
+## What this repo is
 
-### 🎛️ Advanced Features
-- **6 Detection Algorithms**: Choose the perfect method for your file types
-- **Smart Similarity Thresholds**: Real-time adjustment for text similarity scoring
-- **Complete Undo System**: Full backup and restore for safe file management
-- **Batch Operations**: Multi-select with smart grouping and mass operations
-- **Intelligent Filtering**: File types, size ranges, modification dates, and custom patterns
-- **Live Preview**: Built-in viewers for images, text, and file properties
+Same product as the original: a PyQt6 desktop app that finds duplicate files by content — perceptual image hashing, audio fingerprinting, video scene matching, semantic text similarity — with full undo. For features, algorithms, and shortcuts, see the **[canonical README in `duplicate-app`](https://github.com/Namans12/duplicate-app#readme)**.
 
-### 🎨 Modern Interface
-- **Tabbed Design**: Organized scan options, results, and file operations
-- **Dark/Light Themes**: Professional theming with system-wide application
-- **Smart Search**: Real-time filtering of duplicates by filename or path
-- **Enhanced Progress**: ETA display and current file tracking
-- **Keyboard Shortcuts**: Full hotkey support for power users (Ctrl+P, Ctrl+A, Del, etc.)
-- **Live Preview**: Built-in viewers for images, text, and file properties
+This README covers what changed.
 
-### 🔍 Enhanced User Experience
-- **Search Within Results**: Instant filtering of duplicate groups
-- **Progress Details**: Real-time ETA and current file display
-- **Theme Toggle**: Dark/light mode with persistent settings
-- **Keyboard Navigation**: Complete shortcut system for efficiency
-- **Visual Feedback**: Emoji indicators and smooth animations
-- **Status Updates**: Comprehensive progress and operation feedback
+## How it differs from `duplicate-app`
 
-## 🚀 Quick Start
+### Added
 
-### Installation
+| File | Purpose |
+|---|---|
+| `setup_app_env.ps1` | Builds an isolated `.venv-app` so the app's heavy ML dependencies don't pollute your global Python |
+| `launch_app_env.bat` | Launches from that isolated env; tells you to run the setup script if it's missing |
+| `requirements-app-env.txt` | Pinned dependency set for the isolated env |
+| `verify_app_env.py` | Verifies the environment is correctly built before launch |
+| `bootstrap_launch.py` | Preloads shared dependency bootstrap, then runs any entry point via `runpy` |
+| `media_profiles.py` | Per-media-type detection defaults — different thresholds and algorithms for images vs audio vs video vs documents |
+
+### Removed
+
+`SPEC.md`, `DEVELOPMENT-LOG.md`, `AUDIO_ERROR_SUPPRESSION.md`, and `.github/` instructions. **Those survive only in [`duplicate-app`](https://github.com/Namans12/duplicate-app)** — the audio-error-suppression notes in particular are still relevant here.
+
+### Modified
+
+| File | original | here | Δ |
+|---|---|---|---|
+| `main.py` | 5939 | 6065 | +126 |
+| `dependencies.py` | 274 | 301 | +27 |
+| `launcher.py` | 181 | 85 | **−96** |
+| `gpu_accelerator.py` | 2448 | 2455 | +7 |
+
+`launcher.py` shrank because version-picking moved out to the environment scripts.
+
+## Branches
+
+### `final` — 2026-05-13, +7 commits
+
+The real continuation. Six commits of engine work, then a large validation pass:
+
+| Date | Commit | What it did |
+|---|---|---|
+| 2026-03-08 | Best yet | Broad pass across 11 core modules |
+| 2026-03-10 | Fixed Speed | `gpu_accelerator.py` and `main.py` performance |
+| 2026-03-10 | Fixed more | GPU, main, media profiles |
+| 2026-03-10 | Fixed Bugs | Bootstrap, database, merger, launcher, main, profiles |
+| 2026-03-10 | 100% hash move updated | Hash-based move correctness in `main.py` |
+| 2026-05-13 | Picsort issues | Real-folder validation — see below |
+
+The final commit adds a verification harness rather than just more features:
+
+- `run_real_folder_dedup.py` — runs deduplication against a real library
+- `restore_dedup_moves.py` — reverses a run
+- `audio_e2e_benchmark.py` — end-to-end audio dedup benchmark
+- `tests/test_app_smoke_scan.py`, `test_core_integrity_hardening.py`, `test_image_selection_and_moves.py`
+
+It also commits a series of dry-run reports (`real_folder_dedup_report*.{csv,json}`, `real_folder_dedup_report_summary.md`) recording what the engine *would* have done across successive tuning passes — strict-verified, same-track, and v2/v3 variants. Useful as a record of how the thresholds were arrived at; they are output artefacts rather than source.
+
+### `final2` — 2026-05-13, +1 commit
+
+A single "Claude" commit touching 14 core modules — `audio_quality_analyzer`, `bootstrap_launch`, `database_manager`, `dependencies`, `duplicate_merger`, `gpu_accelerator`, `launcher`, `main`, `media_profiles`, `memory_optimizer`, `plugin_system`, the example plugin, and `verify_app_env`. Also commits a stray `.DS_Store`.
+
+Branches from `master`, **not** from `final` — so it does not include any of the March engine work above.
+
+### `updated` — 2026-03-07, +1 commit
+
+Housekeeping: deletes the eight `archive/main_*.py` variants and the `README_enterprise.md` / `README_new.md` duplicates, adds `SETTINGS_CHEATSHEET.md`. The −9020 lines are almost entirely archive removal.
+
+## Installation
+
+### Isolated environment (recommended — this repo's main addition)
+
+```powershell
+git clone https://github.com/Namans12/duplicate-app-final.git
+cd duplicate-app-final
+git checkout final
+powershell -ExecutionPolicy Bypass -File setup_app_env.ps1
+```
+
+Then launch:
+
+```
+launch_app_env.bat
+```
+
+Verify the environment at any point:
+
 ```bash
-pip install -r requirements_enhanced.txt
+python verify_app_env.py
 ```
 
-### Launch Application
+### Standard install
+
 ```bash
-python main_enhanced.py
+pip install -r requirements.txt
+python launcher.py
 ```
 
-### Basic Usage
-1. **Select Directory**: Browse to folder containing potential duplicates
-2. **Choose Algorithm**: Pick detection method based on file types
-3. **Set Filters**: Optional file type, size, or date filtering
-4. **Configure Similarity**: Adjust text similarity threshold if using AI detection
-5. **Start Scan**: Begin analysis with real-time progress tracking
-6. **Review Results**: Examine groups with similarity scores and preview
-7. **Take Action**: Delete, move, or export duplicate findings
+## Which repo should you use?
 
-## ⌨️ Keyboard Shortcuts
+| You want | Use |
+|---|---|
+| Documentation — spec, dev log, audio-error notes | [`duplicate-app`](https://github.com/Namans12/duplicate-app) |
+| The most developed engine, with real-folder validation | **this repo**, on `final` |
+| Clean tree without the `archive/` cruft | this repo, on `updated` |
+| Image-only deduplication | [`PicSorter`](https://github.com/Namans12/PicSorter) |
 
-| Shortcut | Action | Description |
-|----------|--------|-------------|
-| **Ctrl+O** | Browse Directory | Open folder selection dialog |
-| **Ctrl+P** | Preview File | Show preview of selected file |
-| **Ctrl+A** | Select All | Select all duplicate files |
-| **Ctrl+Z** | Undo | Undo last deletion operation |
-| **Ctrl+E** | Export Results | Save duplicate report to CSV |
-| **Ctrl+Q** | Exit | Close the application |
-| **Del** | Delete Selected | Delete checked duplicate files |
+## Caution
 
-## 🔍 Search & Filter
-
-- **Real-time Search**: Type in the search box to filter duplicates instantly
-- **Smart Filtering**: Search by filename, path, or file extension
-- **Live Results**: See filtered results update as you type
-- **Clear Search**: Click ✖ to reset and show all duplicates
-
-## 🎯 Algorithm Guide
-
-| Method | Best For | Similarity Type | Speed |
-|--------|----------|----------------|-------|
-| **Audio Fingerprint** | Music, Podcasts | Content-based | ⚡⚡ |
-| **Video Scenes** | Movies, Videos | Visual scenes | ⚡⚡ |
-| **Text Similarity** | Documents, Code | Semantic content | ⚡ |
-| **Perceptual** | Photos, Images | Visual similarity | ⚡⚡⚡ |
-| **MD5** | General files | Exact matches | ⚡⚡⚡ |
-| **SHA256** | Security-focused | Exact matches | ⚡⚡ |
-
-## 📋 Requirements
-
-### Core Dependencies
-- Python 3.10+
-- PyQt6 ≥ 6.4.0
-- Pillow (PIL)
-- imagehash
-
-### AI Features
-- sentence-transformers ≥ 2.0.0
-- scikit-learn ≥ 1.0.0
-- opencv-python ≥ 4.5.0
-- librosa ≥ 0.9.0
-- pydub
-
-### Optional (Enhanced Audio)
-- pyacoustid + chromaprint
-
-## 📖 Documentation
-
-- **[Advanced Features Guide](ADVANCED_FEATURES.md)**: Detailed explanation of AI algorithms
-- **[UX Enhancements Guide](UX_ENHANCEMENTS.md)**: Complete guide to new user experience features
-- **[Requirements Enhanced](requirements_enhanced.txt)**: Complete dependency list
-- **Original Version**: `main.py` for basic functionality
-
-## 🎨 Themes & Customization
-
-- **Dark Mode**: Professional dark theme for extended use
-- **Light Mode**: Clean bright theme for detailed analysis  
-- **Theme Toggle**: Switch themes via menu (View → Dark/Light Mode) or toolbar
-- **Persistent Settings**: Your theme preference is automatically saved
-
-## 🚀 Pro Tips
-
-- **Use search** to quickly find specific duplicate types (e.g., "photo", ".mp3")
-- **Learn shortcuts** for faster workflow (Ctrl+P for preview, Del for delete)
-- **Try different algorithms** for different file types
-- **Adjust similarity thresholds** for text files to fine-tune results
-- **Use undo freely** - Ctrl+Z restores deleted files safely
-
-```mermaid
-flowchart TD
-    A[Choose folder type] --> B{Mostly music?}
-    B -- Yes --> B1[Music + Accuracy + Audio]
-    B -- No --> C{Mostly photos?}
-    C -- Yes --> C1[Photos + Accuracy + Perceptual]
-    C -- No --> D{Mostly videos?}
-    D -- Yes --> D1[Videos + Accuracy + Perceptual]
-    D -- No --> E{Mostly documents?}
-    E -- Yes --> E1[Documents + Accuracy + Semantic]
-    E -- No --> F{Mostly code?}
-    F -- Yes --> F1[Code + Accuracy + Text Content On]
-    F -- No --> G{Mostly archives?}
-    G -- Yes --> G1[Archives + Accuracy + SHA256]
-    G -- No --> H[General Files]
-    H --> H1[Performance for exact cleanup]
-    H --> H2[Accuracy for broader sweep]
-```
+This tool moves and deletes files. `final` ships `restore_dedup_moves.py` specifically to reverse a bad run — keep it and the generated reports until you have verified the results. Dry-run against a copy first.
